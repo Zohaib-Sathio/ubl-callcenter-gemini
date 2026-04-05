@@ -1,0 +1,260 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from .gemini_live import GEMINI_VOICES
+
+
+def get_voice_info(voice: str) -> tuple:
+    """Get voice name and gender from Gemini voice ID."""
+    voice_data = GEMINI_VOICES.get(voice, GEMINI_VOICES.get('Charon', {}))
+    name = voice_data.get('name', 'Saad')
+    gender = voice_data.get('gender', 'Male').lower()
+    return name, gender
+
+
+def get_gendered_system_prompt(voice: str = 'Charon') -> str:
+    agent_name, gender = get_voice_info(voice)
+    
+    if gender == 'male':
+        greeting_urdu = f"Assalam Alaikam, mera naam {agent_name} hai, UBL Digital call karne ka shukriya, main aap ki kiya madad kar sakta hoon?"
+        ready_urdu = "Ji, main aap ki madad ke liye hazir hoon. Aap mujh se kya poochna chahte hain?"
+        understand_urdu = "Main samajh sakta hoon"
+        listening_urdu = "Ji, main aap ki baat sun raha hoon."
+        transfer_urdu = "Main aap ko abhi hamaray representative se connect kar raha hoon."
+        agent_grammar = "male (use: kar sakta hoon, sun raha hoon, samajh sakta hoon, de sakta hoon)"
+    else:
+        greeting_urdu = f"Assalam Alaikam, mera naam {agent_name} hai, UBL Digital call karne ka shukriya, main aap ki kiya madad kar sakti hoon?"
+        ready_urdu = "Ji, main aap ki madad ke liye hazir hoon. Aap mujh se kya poochna chahte hain?"
+        understand_urdu = "Main samajh sakti hoon"
+        listening_urdu = "Ji, main aap ki baat sun rahi hoon."
+        transfer_urdu = "Main aap ko abhi hamaray representative se connect kar rahi hoon."
+        agent_grammar = "female (use: kar sakti hoon, sun rahi hoon, samajh sakti hoon, de sakti hoon)"
+
+    system_prompt = f"""ROLE: UBL Digital Contact Center Voice Agent — {agent_name} ({gender.capitalize()})
+Grammar: {agent_grammar}
+Style: Energetic, polite, warm. Use customer's name naturally. Never say AI/bot.
+
+LANGUAGE: Detect from user's CURRENT message only. Respond 100% in that language. Switch instantly.
+Markers — Urdu: mera/mujhe/kya/hai/batao | English: my/I/want/need/help | Arabic: أريد/رصيدي | Sindhi: مون/ڇا/آهي | Punjabi: میرا/دسو | Pashto: زما/مرسته | Siraiki: کیہ/دسو
+
+GREETING (Urdu first): "{greeting_urdu}" → Ask name → "{ready_urdu}"
+
+RAG SEARCH: Call searchKnowledgeBase BEFORE answering any banking question. Never tell user you searched. Use ONLY exact product names from results. If no results, say you don't have that info. Remember results for follow-ups — don't re-search same topic.
+
+VERIFICATION (max 3 attempts each, then transferToAgent):
+- No verification needed: General info, FAQs, rates, branches
+- Balance: CNIC → TPIN → getCustomerStatus
+- Card activation: CNIC → Physical custody → TPIN → Last 4 + Expiry → activateCard → IVR
+
+SECURITY: Never share full account numbers/CNIC/PINs/OTPs. 3 failures → branch/agent.
+GUARDRAILS: Banking only. Redirect non-banking politely. 2 failed clarifications → offer representative.
+CONTACT: UBL Digital Helpline 0800-55-825 | ubldigital.com
+"""
+    
+    return system_prompt
+
+
+function_call_tools = [
+    {
+        "type": "function",
+        "name": "searchKnowledgeBase",
+        "description": "Search UBL knowledge base for banking products, services, accounts, cards, loans, procedures, fees, and eligibility. Call before answering any banking question. Do not re-search the same topic.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The customer's question or topic to search for. Rephrase as a clear search query."
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "verifyCustomerByCnic",
+        "description": "Verify customer identity by CNIC number and retrieve customer profile. This is the first step in the activation flow.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cnic": {
+                    "type": "string",
+                    "description": "Customer's CNIC number (format: XXXXX-XXXXXXX-X or 13 digits)"
+                }
+            },
+            "required": ["cnic"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "confirmPhysicalCustody",
+        "description": "Confirm that the customer has physical custody of their debit card. Ask customer if they have received their card.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cnic": {
+                    "type": "string",
+                    "description": "Customer's CNIC number"
+                },
+                "hasCard": {
+                    "type": "string",
+                    "description": "Whether the customer has the physical card. Use 'true' if customer confirms they have it, 'false' otherwise."
+                }
+            },
+            "required": ["cnic", "hasCard"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "verifyTpin",
+        "description": "Verify customer's TPIN (4-digit Transaction PIN). Customer must provide their current generic TPIN.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cnic": {
+                    "type": "string",
+                    "description": "Customer's CNIC number"
+                },
+                "tpin": {
+                    "type": "string",
+                    "description": "4-digit TPIN entered by customer"
+                }
+            },
+            "required": ["cnic", "tpin"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "verifyCardDetails",
+        "description": "Verify debit card details including last 4 digits and expiry date. Both must match for successful verification.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cnic": {
+                    "type": "string",
+                    "description": "Customer's CNIC number"
+                },
+                "lastFourDigits": {
+                    "type": "string",
+                    "description": "Last 4 digits of the debit card"
+                },
+                "expiryDate": {
+                    "type": "string",
+                    "description": "Card expiry date in format MM/YY or MM/YYYY (e.g., 09/27 or 09/2027)"
+                }
+            },
+            "required": ["cnic", "lastFourDigits", "expiryDate"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "activateCard",
+        "description": "Activate the customer's debit card after all verifications are complete. Call this only after CNIC, physical custody, TPIN, and card details are verified.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cnic": {
+                    "type": "string",
+                    "description": "Customer's CNIC number"
+                }
+            },
+            "required": ["cnic"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "updateCustomerTpin",
+        "description": "Update customer's TPIN after they set a new one through IVR. This should be called after IVR PIN generation is complete.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cnic": {
+                    "type": "string",
+                    "description": "Customer's CNIC number"
+                },
+                "newTpin": {
+                    "type": "string",
+                    "description": "New 4-digit TPIN set by customer in IVR"
+                }
+            },
+            "required": ["cnic", "newTpin"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "transferToIvrForPin",
+        "description": "Transfer the call to IVR system for card PIN generation. Call this after card activation is successful.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "function",
+        "name": "transferToAgent",
+        "description": "Transfer the call to a human agent. Use this when: 1) Customer exceeds maximum verification attempts, 2) Customer doesn't have physical card, 3) Technical issues occur, or 4) Customer explicitly requests agent.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cnic": {
+                    "type": "string",
+                    "description": "Customer's CNIC number (if available)"
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Reason for transferring to agent (e.g., 'Max attempts exceeded', 'No physical card', 'Customer request')"
+                }
+            },
+            "required": ["cnic", "reason"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "getCustomerStatus",
+        "description": "Get the current status of customer's card activation process including verification statuses and attempts remaining.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cnic": {
+                    "type": "string",
+                    "description": "Customer's CNIC number"
+                }
+            },
+            "required": ["cnic"]
+        }
+    }
+]
+
+
+def build_system_message(
+    instructions: str = "",
+    caller: str = "",
+    voice: str = "sage"
+) -> str:
+    karachi_tz = ZoneInfo("Asia/Karachi")
+    now = datetime.now(karachi_tz)
+
+    date_str = now.strftime("%Y-%m-%d")
+    day_str  = now.strftime("%A")
+    time_str = now.strftime("%H:%M:%S %Z")
+
+    date_line = (
+        f"Today's date is {date_str} ({day_str}), "
+        f"and the current time is {time_str}.\n\n"
+    )
+
+    language_reminder = ""
+
+    caller_line = f"Caller: {caller}\n\n" if caller else ""
+    
+    system_prompt = get_gendered_system_prompt(voice)
+    
+
+    if instructions:
+        print(f"####################################This is a registered call with voice: {voice}")
+        context = f"This is a registered caller and their details are as follows:\n{instructions}"
+        return f"{language_reminder}\n{system_prompt}\n{date_line}\n{caller_line}\n{context}"
+    else:
+        print(f"####################################This is a non registered call with voice: {voice}")
+        base = f"{language_reminder}\n{system_prompt}\n{date_line}\n{caller_line}"
+        return base

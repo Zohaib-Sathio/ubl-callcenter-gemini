@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>UBL Digital Customer Support - AI Call Center</title>
+  <meta name="description" content="AI-Powered Bank Call Center Demo - UBL Digital Customer Support" />
+  <meta name="robots" content="noindex, nofollow" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Gulzar&family=Roboto:wght@300;400;500;700;900&family=Open+Sans:wght@300;400;500;600;700;800&display=swap"
+    rel="stylesheet" />
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            "ubl-blue": "#003366",
+            "ubl-light-blue": "#0066CC",
+            "ubl-gold": "#FFB81C",
+          },
+          animation: {
+            "pulse-slow": "pulse 2.5s ease-in-out infinite",
+            shimmer: "shimmer 2s infinite",
+            "slide-up": "slideUp 0.4s ease-out",
+          },
+          keyframes: {
+            shimmer: { "0%": { transform: "translateX(-100%)" }, "100%": { transform: "translateX(100%)" } },
+            slideUp: { "0%": { opacity: "0", transform: "translateY(20px)" }, "100%": { opacity: "1", transform: "translateY(0)" } },
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    body {
+      font-family: "Roboto", "Open Sans", sans-serif;
+    }
+
+    [dir="rtl"] {
+      font-family: "Gulzar", serif;
+      font-size: 1.1em;
+    }
+
+    @keyframes slideInUp {
+      from {
+        opacity: 0;
+        transform: translateY(20px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .slider {
+      -webkit-appearance: none;
+      appearance: none;
+    }
+
+    .slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #003366, #0066CC);
+      cursor: pointer;
+      border: 3px solid white;
+      box-shadow: 0 2px 8px rgba(0, 51, 102, 0.3);
+    }
+
+    .slider::-moz-range-thumb {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #003366, #0066CC);
+      cursor: pointer;
+      border: 3px solid white;
+    }
+
+    @keyframes blink {
+
+      0%,
+      100% {
+        opacity: 1;
+        transform: scale(1);
+      }
+
+      50% {
+        opacity: 0.4;
+        transform: scale(0.9);
+      }
+    }
+
+    .status-dot {
+      animation: blink 1.5s ease-in-out infinite;
+    }
+  </style>
+</head>
+
+<body class="h-full bg-gradient-to-br from-gray-50 to-gray-100 flex flex-col">
+  <!-- Login Modal -->
+  <div id="loginModal"
+    class="fixed inset-0 bg-black bg-opacity-60 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+    style="display: flex">
+    <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8 animate-slide-up">
+      <div class="text-center mb-8">
+        <div
+          class="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-ubl-blue to-ubl-light-blue rounded-full shadow-lg mx-auto mb-4">
+          <svg class="w-10 h-10 fill-white" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path
+              d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z" />
+          </svg>
+        </div>
+        <h2 class="text-2xl font-bold text-gray-900 mb-2">Welcome to UBL Digital<br /><span class="text-xl" dir="rtl">یو
+            بی ایل ڈیجیٹل میں خوش آمدید</span></h2>
+        <p class="text-sm text-gray-600">Sign in to access the AI Call Center</p>
+      </div>
+      <form id="loginForm" class="space-y-5">
+        <div>
+          <label for="username" class="block text-sm font-semibold text-gray-700 mb-2">Username</label>
+          <input type="text" id="username" name="username" required autocomplete="username"
+            class="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-ubl-blue focus:ring-2 focus:ring-ubl-blue/20 outline-none transition-all duration-200"
+            placeholder="Enter your username" />
+        </div>
+        <div>
+          <label for="password" class="block text-sm font-semibold text-gray-700 mb-2">Password</label>
+          <input type="password" id="password" name="password" required autocomplete="current-password"
+            class="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-ubl-blue focus:ring-2 focus:ring-ubl-blue/20 outline-none transition-all duration-200"
+            placeholder="Enter your password" />
+        </div>
+        <div id="loginError" class="hidden bg-red-50 border-2 border-red-200 rounded-lg p-3 text-sm text-red-700">
+          <div class="flex items-center gap-2">
+            <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span id="loginErrorMessage">Invalid credentials</span>
+          </div>
+        </div>
+        <button type="submit" id="loginBtn"
+          class="w-full bg-gradient-to-r from-ubl-blue to-ubl-light-blue text-white font-bold py-3 px-4 rounded-lg shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 flex items-center justify-center gap-2">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
+          </svg>
+          <span>Sign In</span>
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Header -->
+  <header class="bg-gradient-to-r from-ubl-blue to-ubl-light-blue shadow-xl sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <span class="text-white font-bold text-lg tracking-tight">UBL Digital Customer Support</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <div id="userInfo"
+          class="hidden text-white text-xs bg-white/20 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/30">
+          Welcome, <span id="userFullName" class="font-semibold">User</span>
+        </div>
+        <button id="logoutBtn"
+          class="hidden text-white text-xs bg-blue-900/80 hover:bg-blue-900 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/30 transition-all duration-200 flex items-center gap-1">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+          </svg>
+          Logout
+        </button>
+        <div
+          class="hidden sm:block text-white text-xs bg-white/20 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/30">
+          AI Powered</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="flex-1 overflow-auto">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 lg:py-6">
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6">
+        <!-- Left Column: Call Controls -->
+        <div class="lg:col-span-1">
+          <div class="bg-white rounded-xl shadow-lg p-4 lg:p-6 border-t-4 border-ubl-blue">
+            <div class="text-center mb-4">
+              <div
+                class="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-ubl-blue to-ubl-light-blue rounded-full shadow-lg mx-auto mb-3">
+                <svg class="w-8 h-8 fill-white" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                  <path
+                    d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z" />
+                </svg>
+              </div>
+              <h1 class="text-xl font-bold text-gray-900 mb-1">Connect with Support<br /><span class="text-base"
+                  dir="rtl">سپورٹ سے رابطہ کریں</span></h1>
+              <p class="text-sm text-gray-600">Configure and start your call</p>
+            </div>
+
+            <div class="space-y-3 mb-4">
+              <div class="bg-gray-50 p-3 rounded-lg border border-gray-200">
+                <div class="flex justify-between items-center mb-2">
+                  <span class="text-xs font-semibold text-gray-700">⚡ Speech Speed</span>
+                  <span id="speedValue"
+                    class="text-xs font-bold text-ubl-blue bg-blue-100 px-2 py-0.5 rounded">1.05x</span>
+                </div>
+                <input type="range" min="0.5" max="1.5" step="0.05" value="1.05"
+                  class="slider w-full h-2 bg-gray-200 rounded-lg cursor-pointer" id="speedSlider" />
+              </div>
+            </div>
+
+            <div class="space-y-2 mb-4">
+              <button id="startBtn"
+                class="w-full bg-gradient-to-r from-ubl-blue to-ubl-light-blue text-white font-bold py-3 px-4 rounded-lg shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 flex items-center justify-center gap-2">
+                <svg class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                  <path
+                    d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z" />
+                </svg>
+                <span>Start Call / <span dir="rtl">کال شروع کریں</span></span>
+              </button>
+              <button id="stopBtn" disabled
+                class="w-full bg-white text-blue-600 border-2 border-blue-600 font-bold py-3 px-4 rounded-lg hover:bg-blue-600 hover:text-white transform hover:-translate-y-0.5 transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none">
+                <svg class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                  <path
+                    d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 0 1-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.52-.29.7l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 0 0-2.67-1.85.989.989 0 0 1-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z" />
+                </svg>
+                <span>End Call / <span dir="rtl">کال ختم کریں</span></span>
+              </button>
+            </div>
+
+            <div id="statusContainer" class="hidden flex-col items-center gap-2 mb-4">
+              <div
+                class="inline-flex items-center gap-2 bg-gradient-to-r from-green-100 to-green-50 border-2 border-green-500 rounded-full px-4 py-2">
+                <div class="status-dot w-2.5 h-2.5 bg-green-500 rounded-full"></div>
+                <span class="text-sm font-semibold text-green-800">Call in progress</span>
+              </div>
+              <div id="callTimer" class="text-sm font-mono font-bold text-gray-700">00:00</div>
+            </div>
+
+            <pre id="log"
+              class="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs font-mono h-32 overflow-y-auto text-gray-600"></pre>
+          </div>
+        </div>
+
+        <!-- Right Column -->
+        <div class="lg:col-span-2 space-y-4">
+          <!-- Voice Selection -->
+          <div class="bg-white rounded-xl shadow-lg p-4 lg:p-6 border-t-4 border-ubl-blue">
+            <h2 class="text-lg font-bold text-gray-900 mb-3 flex items-center gap-2">
+              <svg class="w-6 h-6 text-ubl-blue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+              </svg>
+              <span>Select Voice Agent</span>
+            </h2>
+            <div class="relative">
+              <button id="voiceDropdownBtn"
+                class="w-full bg-gradient-to-br from-white to-gray-50 border-2 border-gray-200 rounded-lg p-4 text-left cursor-pointer transition-all duration-200 hover:border-ubl-gold hover:shadow-md flex items-center justify-between"
+                onclick="toggleVoiceDropdown()">
+                <div id="selectedVoiceDisplay" class="flex-1">
+                  <div class="text-sm font-bold text-gray-900 mb-1">Select a voice...</div>
+                  <div class="text-xs text-gray-500">Choose your preferred voice agent</div>
+                </div>
+                <svg class="w-5 h-5 text-gray-500 transition-transform duration-200" id="voiceDropdownIcon" fill="none"
+                  stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              <div id="voiceDropdownMenu"
+                class="hidden absolute z-10 w-full mt-2 bg-white rounded-lg shadow-xl border-2 border-gray-200 max-h-80 overflow-y-auto">
+                <div id="voiceGrid" class="p-2 space-y-2"></div>
+              </div>
+            </div>
+          </div>
+
+          <div id="analysisContainer"
+            class="hidden bg-white rounded-xl shadow-lg p-4 lg:p-6 border-t-4 border-ubl-blue">
+            <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-2">
+              <h2 class="text-lg font-bold text-gray-900 flex items-center gap-2">
+                <svg class="w-6 h-6 text-ubl-blue shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
+                <span>Call Analysis / <span dir="rtl">کال کا تجزیہ</span></span>
+              </h2>
+              <div class="flex flex-wrap gap-2">
+                <button type="button" id="loadLastCallBtn"
+                  class="hidden items-center gap-1.5 bg-gradient-to-r from-ubl-blue to-ubl-light-blue text-white text-xs font-semibold px-3 py-2 rounded-lg hover:shadow-md transition-all">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  Load last call
+                </button>
+                <button type="button" id="downloadAnalysisBtn"
+                  class="hidden items-center gap-1.5 border-2 border-ubl-blue text-ubl-blue text-xs font-semibold px-3 py-2 rounded-lg hover:bg-blue-50 transition-all">
+                  Download analysis (JSON)
+                </button>
+                <button type="button" id="downloadTranscriptBtn"
+                  class="hidden items-center gap-1.5 border-2 border-gray-300 text-gray-700 text-xs font-semibold px-3 py-2 rounded-lg hover:bg-gray-50 transition-all">
+                  Download transcript (JSON)
+                </button>
+              </div>
+            </div>
+            <div id="analysisContent" class="mt-4 grid grid-cols-1 gap-3"></div>
+          </div>
+
+          <div class="bg-white rounded-xl shadow-lg p-4 lg:p-6 border-t-4 border-ubl-blue">
+            <h2 class="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <svg class="w-6 h-6 text-ubl-blue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+              <span>Quick Services / <span dir="rtl">فوری خدمات</span></span>
+            </h2>
+            <div class="grid grid-cols-2 lg:grid-cols-3 gap-3">
+              <button
+                class="bg-gradient-to-br from-white to-gray-50 border-2 border-gray-200 rounded-lg p-4 text-sm font-semibold text-gray-700 hover:border-ubl-gold hover:text-ubl-blue hover:shadow-lg transform hover:-translate-y-1 transition-all duration-200">
+                <div>Check Balance</div>
+                <div class="text-xs mt-1" dir="rtl">بیلنس چیک کریں</div>
+              </button>
+              <button
+                class="bg-gradient-to-br from-white to-gray-50 border-2 border-gray-200 rounded-lg p-4 text-sm font-semibold text-gray-700 hover:border-ubl-gold hover:text-ubl-blue hover:shadow-lg transform hover:-translate-y-1 transition-all duration-200">
+                <div>Block Card</div>
+                <div class="text-xs mt-1" dir="rtl">کارڈ بلاک کریں</div>
+              </button>
+              <button
+                class="bg-gradient-to-br from-white to-gray-50 border-2 border-gray-200 rounded-lg p-4 text-sm font-semibold text-gray-700 hover:border-ubl-gold hover:text-ubl-blue hover:shadow-lg transform hover:-translate-y-1 transition-all duration-200">
+                <div>Smart Account</div>
+                <div class="text-xs mt-1" dir="rtl">اسمارٹ اکاؤنٹ</div>
+              </button>
+              <button
+                class="bg-gradient-to-br from-white to-gray-50 border-2 border-gray-200 rounded-lg p-4 text-sm font-semibold text-gray-700 hover:border-ubl-gold hover:text-ubl-blue hover:shadow-lg transform hover:-translate-y-1 transition-all duration-200">
+                <div>Activate Card</div>
+                <div class="text-xs mt-1" dir="rtl">کارڈ فعال کریں</div>
+              </button>
+              <button
+                class="bg-gradient-to-br from-white to-gray-50 border-2 border-gray-200 rounded-lg p-4 text-sm font-semibold text-gray-700 hover:border-ubl-gold hover:text-ubl-blue hover:shadow-lg transform hover:-translate-y-1 transition-all duration-200">
+                <div>Digital Banking</div>
+                <div class="text-xs mt-1" dir="rtl">ڈیجیٹل بینکنگ</div>
+              </button>
+              <button
+                class="bg-gradient-to-br from-white to-gray-50 border-2 border-gray-200 rounded-lg p-4 text-sm font-semibold text-gray-700 hover:border-ubl-gold hover:text-ubl-blue hover:shadow-lg transform hover:-translate-y-1 transition-all duration-200">
+                <div>Other Queries</div>
+                <div class="text-xs mt-1" dir="rtl">دیگر سوالات</div>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <div id="analysisModal"
+    class="fixed inset-0 bg-black bg-opacity-50 backdrop-blur-sm z-50 items-center justify-center p-4"
+    style="display: none"
+    onclick="if (event.target === this) closeUblAnalysisModal()">
+    <div class="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col"
+      onclick="event.stopPropagation()">
+      <div class="bg-gradient-to-r from-ubl-blue to-ubl-light-blue p-4 lg:p-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <h2 class="text-xl font-bold text-white flex items-center gap-2">
+          <svg class="w-7 h-7 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+          </svg>
+          <span>Call analysis report</span>
+        </h2>
+        <div class="flex flex-wrap items-center gap-2">
+          <button type="button" id="modalDownloadAnalysisBtn"
+            class="hidden text-xs font-semibold px-3 py-2 rounded-lg bg-white/20 text-white border border-white/40 hover:bg-white/30">
+            Download analysis
+          </button>
+          <button type="button" id="modalDownloadTranscriptBtn"
+            class="hidden text-xs font-semibold px-3 py-2 rounded-lg bg-white/20 text-white border border-white/40 hover:bg-white/30">
+            Download transcript
+          </button>
+          <button type="button" onclick="closeUblAnalysisModal()"
+            class="text-white hover:bg-white/20 rounded-full p-2 transition-all self-start sm:self-auto">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div id="modalAnalysisContent" class="flex-1 overflow-y-auto p-4 lg:p-6 bg-gray-50"></div>
+    </div>
+  </div>
+
+  <script>
+    const JWT_TOKEN_KEY = "jwt_token";
+    const USER_DATA_KEY = "user_data";
+    const LAST_CALL_ID_KEY = "lastCallId";
+
+    function checkAuth() {
+      const token = localStorage.getItem(JWT_TOKEN_KEY);
+      const userData = localStorage.getItem(USER_DATA_KEY);
+      const loginModal = document.getElementById("loginModal");
+      const userInfo = document.getElementById("userInfo");
+      const userFullName = document.getElementById("userFullName");
+      const logoutBtn = document.getElementById("logoutBtn");
+
+      if (!token || !userData) {
+        loginModal.style.display = "flex";
+        userInfo.classList.add("hidden");
+        logoutBtn.classList.add("hidden");
+        return false;
+      }
+
+      try {
+        const user = JSON.parse(userData);
+        userFullName.textContent = user.full_name;
+        userInfo.classList.remove("hidden");
+        logoutBtn.classList.remove("hidden");
+        loginModal.style.display = "none";
+        return true;
+      } catch (error) {
+        loginModal.style.display = "flex";
+        return false;
+      }
+    }
+
+    function getAuthHeaders() {
+      const token = localStorage.getItem(JWT_TOKEN_KEY);
+      return { "Content-Type": "application/json", Authorization: token ? `Bearer ${token}` : "" };
+    }
+
+    async function authFetch(url, options = {}) {
+      const headers = Object.assign({}, options.headers || {}, getAuthHeaders());
+      const response = await fetch(url, { ...options, headers });
+      if (response.status === 401) {
+        localStorage.removeItem(JWT_TOKEN_KEY);
+        localStorage.removeItem(USER_DATA_KEY);
+        document.getElementById("loginModal").style.display = "flex";
+        throw new Error("Unauthorized");
+      }
+      return response;
+    }
+
+    function log(msg) {
+      const el = document.getElementById("log");
+      el.textContent += msg + "\n";
+      el.scrollTop = el.scrollHeight;
+    }
+
+    window.__ublAuthFetch = authFetch;
+    window.__ublLog = log;
+  </script>
+  <script src="/client/call-analysis-ui.js"></script>
+  <script>
+    function logTokenUsageSummary() {
+      if (!callSessionTokenUsage) return;
+      const t = callSessionTokenUsage;
+      log("─".repeat(40));
+      log("📊 Token Usage Summary");
+      log(`   Prompt tokens:   ${t.prompt_token_count ?? 0}`);
+      log(`   Response tokens:  ${t.response_token_count ?? 0}`);
+      log(`   Total tokens:     ${t.total_token_count ?? 0}`);
+      log("─".repeat(40));
+    }
+
+    function floatTo16BitPCM(float32Array) {
+      const buffer = new ArrayBuffer(float32Array.length * 2);
+      const view = new DataView(buffer);
+      for (let i = 0, offset = 0; i < float32Array.length; i++, offset += 2) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      }
+      return new Uint8Array(buffer);
+    }
+
+    function uint8ToBase64(u8) {
+      let s = "";
+      const chunkSize = 0x8000;
+      for (let i = 0; i < u8.length; i += chunkSize) s += String.fromCharCode.apply(null, u8.subarray(i, i + chunkSize));
+      return btoa(s);
+    }
+
+    function base64ToArrayBuffer(base64) {
+      const binary = atob(base64);
+      const ab = new ArrayBuffer(binary.length);
+      const ua = new Uint8Array(ab);
+      for (let i = 0; i < binary.length; i++) ua[i] = binary.charCodeAt(i);
+      return ab;
+    }
+
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const statusContainer = document.getElementById("statusContainer");
+    const voiceGrid = document.getElementById("voiceGrid");
+    const speedSlider = document.getElementById("speedSlider");
+    const speedValue = document.getElementById("speedValue");
+    const callTimer = document.getElementById("callTimer");
+
+    let ws, micContext, micProc, micSource, audioContext, masterGainNode;
+    let audioQueue = [], lastScheduledTime = 0, call_id;
+    let selectedVoice = "Charon", selectedSpeed = 1.05;
+    let availableVoices = {}, callTimerInterval = null;
+    const MAX_SCHEDULE_LOOKAHEAD = 0.15;
+    // Native sample rate for Gemini input (16kHz) - no server-side resampling needed
+    const MIC_SAMPLE_RATE = 16000;
+
+    function toggleVoiceDropdown() {
+      const menu = document.getElementById("voiceDropdownMenu");
+      const icon = document.getElementById("voiceDropdownIcon");
+      if (menu.classList.contains("hidden")) {
+        menu.classList.remove("hidden");
+        icon.style.transform = "rotate(180deg)";
+      } else {
+        menu.classList.add("hidden");
+        icon.style.transform = "rotate(0deg)";
+      }
+    }
+
+    document.addEventListener("click", (e) => {
+      const dropdownBtn = document.getElementById("voiceDropdownBtn");
+      const dropdownMenu = document.getElementById("voiceDropdownMenu");
+      if (dropdownBtn && dropdownMenu && !dropdownBtn.contains(e.target) && !dropdownMenu.contains(e.target)) {
+        dropdownMenu.classList.add("hidden");
+        document.getElementById("voiceDropdownIcon").style.transform = "rotate(0deg)";
+      }
+    });
+
+    speedSlider.addEventListener("input", (e) => { selectedSpeed = parseFloat(e.target.value); speedValue.textContent = selectedSpeed.toFixed(2) + "x"; });
+
+    function clearAudioQueue() {
+      audioQueue.forEach((source) => { try { source.stop(); } catch (e) { } });
+      audioQueue = [];
+      if (audioContext) lastScheduledTime = audioContext.currentTime;
+    }
+
+    async function loadVoices() {
+      try {
+        const resp = await authFetch("/available-voices");
+        const data = await resp.json();
+        availableVoices = data.voices;
+        voiceGrid.innerHTML = "";
+        for (const [key, voice] of Object.entries(availableVoices)) {
+          const card = document.createElement("div");
+          const isSelected = key === selectedVoice;
+          card.className = `voice-card relative p-3 rounded-lg border-2 cursor-pointer transition-all duration-200 ${isSelected ? "border-ubl-blue bg-gradient-to-br from-blue-50 to-blue-100" : "border-gray-200 bg-white hover:border-ubl-gold hover:bg-blue-50"}`;
+          card.dataset.voice = key;
+          card.innerHTML = `<div class="text-sm font-bold text-gray-900 mb-1">${voice.name}</div><div class="text-xs text-gray-500 mb-1">${voice.age}</div><div class="text-xs text-gray-600 leading-snug">${voice.personality}</div>`;
+          card.addEventListener("click", function () {
+            document.querySelectorAll(".voice-card").forEach((c) => { c.classList.remove("border-ubl-blue", "bg-gradient-to-br", "from-blue-50", "to-blue-100"); c.classList.add("border-gray-200", "bg-white"); });
+            this.classList.remove("border-gray-200", "bg-white");
+            this.classList.add("border-ubl-blue", "bg-gradient-to-br", "from-blue-50", "to-blue-100");
+            selectedVoice = this.dataset.voice;
+            updateSelectedVoiceDisplay();
+            document.getElementById("voiceDropdownMenu").classList.add("hidden");
+            document.getElementById("voiceDropdownIcon").style.transform = "rotate(0deg)";
+          });
+          voiceGrid.appendChild(card);
+        }
+        updateSelectedVoiceDisplay();
+      } catch (err) {
+        log("Error loading voices. Using defaults.");
+      }
+    }
+
+    function updateSelectedVoiceDisplay() {
+      const displayEl = document.getElementById("selectedVoiceDisplay");
+      const voice = availableVoices[selectedVoice];
+      if (voice) displayEl.innerHTML = `<div class="text-sm font-bold text-gray-900 mb-1">${voice.name}</div><div class="text-xs text-gray-500 mb-1">${voice.age}</div><div class="text-xs text-gray-600 leading-snug">${voice.personality}</div>`;
+    }
+
+    function startCallTimer() {
+      const timerEl = document.getElementById("callTimer");
+      if (callTimerInterval) clearInterval(callTimerInterval);
+      const startedAt = Date.now();
+      timerEl.textContent = "00:00";
+      callTimerInterval = setInterval(() => {
+        const secs = Math.floor((Date.now() - startedAt) / 1000);
+        timerEl.textContent = `${String(Math.floor(secs / 60)).padStart(2, "0")}:${String(secs % 60).padStart(2, "0")}`;
+      }, 1000);
+    }
+
+    function stopCallTimer() {
+      if (callTimerInterval) { clearInterval(callTimerInterval); callTimerInterval = null; }
+      document.getElementById("callTimer").textContent = "00:00";
+    }
+
+    function resolveCallIdForDownloads() {
+      const u = window.ublCallAnalysis;
+      if (!u) return null;
+      return u.getCurrentCallId() || localStorage.getItem(LAST_CALL_ID_KEY);
+    }
+
+    async function initializeApp() {
+      const last = localStorage.getItem(LAST_CALL_ID_KEY);
+      const ac = document.getElementById("analysisContainer");
+      const llb = document.getElementById("loadLastCallBtn");
+      if (last && ac && llb) {
+        ac.classList.remove("hidden");
+        llb.classList.remove("hidden");
+        llb.classList.add("flex");
+        document.getElementById("analysisContent").innerHTML = "";
+      }
+      await loadVoices();
+    }
+
+    let callSessionTokenUsage = null;
+
+    startBtn.onclick = async () => {
+      startBtn.disabled = true;
+      speedSlider.disabled = true;
+      statusContainer.classList.remove("hidden");
+      statusContainer.classList.add("flex");
+      callSessionTokenUsage = null;
+
+      const voiceInfo = availableVoices[selectedVoice];
+      log(`Starting call with ${voiceInfo?.name || selectedVoice}`);
+
+      const resp = await authFetch("/start-browser-call", {
+        method: "POST",
+        body: JSON.stringify({ phone: "webclient", voice: selectedVoice, speed: selectedSpeed }),
+      });
+
+      const body = await resp.json();
+      call_id = body.call_id;
+      log("Call ID: " + call_id);
+      localStorage.setItem(LAST_CALL_ID_KEY, call_id);
+
+      audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive", sampleRate: 24000 });
+      await audioContext.resume();
+
+      masterGainNode = audioContext.createGain();
+      masterGainNode.gain.value = 2.0;
+      const compressor = audioContext.createDynamicsCompressor();
+      compressor.threshold.value = -30; compressor.knee.value = 20; compressor.ratio.value = 4; compressor.attack.value = 0.005; compressor.release.value = 0.1;
+      const lowPassFilter = audioContext.createBiquadFilter();
+      lowPassFilter.type = "lowpass"; lowPassFilter.frequency.value = 3800; lowPassFilter.Q.value = 1.0;
+      masterGainNode.connect(compressor);
+      compressor.connect(lowPassFilter);
+      lowPassFilter.connect(audioContext.destination);
+      lastScheduledTime = audioContext.currentTime;
+
+      ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/media-stream-browser");
+
+      ws.addEventListener("open", () => {
+        log("WebSocket connected");
+        const token = localStorage.getItem(JWT_TOKEN_KEY);
+        ws.send(JSON.stringify({ event: "start", start: { streamSid: "browser-stream-" + Math.random().toString(36).slice(2, 8), callSid: "browser-call-" + Math.random().toString(36).slice(2, 8), customParameters: { call_id: call_id, token: token } } }));
+        startCallTimer();
+      });
+
+      ws.addEventListener("message", async (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (data.event === "clear") { clearAudioQueue(); log("🔇 Audio queue cleared"); }
+          else if (data.event === "token_usage") {
+            callSessionTokenUsage = data.session_total || data.usage || callSessionTokenUsage;
+          }
+          else if (data.event === "media" && data.media?.payload) {
+            if (data.media.format === "raw_pcm") {
+              const pcmData = base64ToArrayBuffer(data.media.payload);
+              const pcmInt16 = new Int16Array(pcmData);
+              const sampleRate = data.media.sampleRate || 24000;
+              const audioBuffer = audioContext.createBuffer(1, pcmInt16.length, sampleRate);
+              const channelData = audioBuffer.getChannelData(0);
+              // Convert int16 to float32 without fading (fading causes knocking artifacts)
+              for (let i = 0; i < pcmInt16.length; i++) {
+                channelData[i] = pcmInt16[i] / 32768.0;
+              }
+              if (lastScheduledTime < audioContext.currentTime - MAX_SCHEDULE_LOOKAHEAD) lastScheduledTime = audioContext.currentTime;
+              const src = audioContext.createBufferSource();
+              src.buffer = audioBuffer;
+              src.connect(masterGainNode);
+              const startAt = Math.max(audioContext.currentTime, lastScheduledTime);
+              src.start(startAt);
+              lastScheduledTime = startAt + audioBuffer.duration;
+              audioQueue.push(src);
+              src.onended = () => { const idx = audioQueue.indexOf(src); if (idx > -1) audioQueue.splice(idx, 1); };
+            }
+          }
+        } catch (e) { console.error("WebSocket message error", e); }
+      });
+
+      ws.addEventListener("close", () => {
+        log("WebSocket closed");
+        logTokenUsageSummary();
+        statusContainer.classList.add("hidden");
+        statusContainer.classList.remove("flex");
+        speedSlider.disabled = false;
+        stopCallTimer();
+      });
+
+      ws.addEventListener("error", (err) => { log("⚠️ WebSocket error occurred"); });
+
+      // Use 16kHz sample rate to match Gemini's native input format (eliminates server-side resampling)
+      micContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: MIC_SAMPLE_RATE });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { noiseSuppression: true, echoCancellation: true, sampleRate: MIC_SAMPLE_RATE } });
+      micSource = micContext.createMediaStreamSource(stream);
+
+      const workletCode = `class AudioProcessor extends AudioWorkletProcessor {
+        constructor() { super(); this.lastVoiceTime = currentTime; }
+        process(inputs, outputs, parameters) {
+          const input = inputs[0];
+          if (!input || !input[0]) return true;
+          const ch = input[0];
+          let sum = 0;
+          for (let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
+          const rms = Math.sqrt(sum / ch.length);
+          const VOLUME_THRESHOLD = 0.08;
+          const HANGOVER_MS = 0.5;
+          if (rms > VOLUME_THRESHOLD){
+          console.log("RMS:", rms);
+          this.lastVoiceTime = currentTime; }
+          const shouldSendAudio = rms > VOLUME_THRESHOLD || (currentTime - this.lastVoiceTime) < HANGOVER_MS;
+          this.port.postMessage({ audio: ch, sendAudio: shouldSendAudio });
+          return true;
+        }
+      }
+      registerProcessor('audio-processor', AudioProcessor);`;
+      const blob = new Blob([workletCode], { type: "application/javascript" });
+      const workletUrl = URL.createObjectURL(blob);
+      await micContext.audioWorklet.addModule(workletUrl);
+      URL.revokeObjectURL(workletUrl);
+
+      micProc = new AudioWorkletNode(micContext, "audio-processor", { numberOfInputs: 1, numberOfOutputs: 1 });
+      let lastSpeechLogTime = 0;
+      const SPEECH_LOG_INTERVAL_MS = 2000;
+      micProc.port.onmessage = (e) => {
+        const { audio, sendAudio } = e.data;
+        if (sendAudio) {
+          const now = Date.now();
+          if (now - lastSpeechLogTime > SPEECH_LOG_INTERVAL_MS) {
+            log("🗣️ Speech detected, sending audio...");
+            lastSpeechLogTime = now;
+          }
+          const pcm16 = floatTo16BitPCM(audio);
+          const b64 = uint8ToBase64(pcm16);
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ event: "media", media: { payload: b64, timestamp: Date.now() } }));
+        } else {
+          const silence = new Uint8Array(audio.length * 2);
+          const b64 = uint8ToBase64(silence);
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ event: "media", media: { payload: b64, timestamp: Date.now() } }));
+        }
+      };
+      micSource.connect(micProc);
+      micProc.connect(micContext.destination);
+      stopBtn.disabled = false;
+      log("🎤 Microphone active");
+    };
+
+    stopBtn.onclick = () => {
+      stopBtn.disabled = true;
+      statusContainer.classList.add("hidden");
+      statusContainer.classList.remove("flex");
+      clearAudioQueue();
+      if (micProc) { micProc.disconnect(); micProc.port.onmessage = null; }
+      if (micSource) micSource.disconnect();
+      if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ event: "stop" })); ws.close(); }
+      speedSlider.disabled = false;
+      startBtn.disabled = false;
+      log("Call ended");
+      logTokenUsageSummary();
+      stopCallTimer();
+      if (call_id && window.ublCallAnalysis) {
+        window.ublCallAnalysis.startAnalysisCountdown(call_id);
+      }
+    };
+
+    document.addEventListener("DOMContentLoaded", async () => {
+      const loginForm = document.getElementById("loginForm");
+      const loginError = document.getElementById("loginError");
+      const loginErrorMessage = document.getElementById("loginErrorMessage");
+      const loginBtn = document.getElementById("loginBtn");
+      const logoutBtn = document.getElementById("logoutBtn");
+
+      const isAuthenticated = checkAuth();
+      if (isAuthenticated) await initializeApp();
+
+      const loadLastCallBtnEl = document.getElementById("loadLastCallBtn");
+      if (loadLastCallBtnEl) {
+        loadLastCallBtnEl.addEventListener("click", () => {
+          const id = localStorage.getItem(LAST_CALL_ID_KEY);
+          if (id && window.ublCallAnalysis) window.ublCallAnalysis.fetchCallAnalysis(id, true, false);
+          else log("No previous call saved");
+        });
+      }
+      function bindDownload(btnId, transcript) {
+        const el = document.getElementById(btnId);
+        if (!el) return;
+        el.addEventListener("click", () => {
+          const cid = resolveCallIdForDownloads();
+          if (!cid) { log("No call ID for download"); return; }
+          if (!window.ublCallAnalysis) return;
+          if (transcript) window.ublCallAnalysis.downloadTranscript(cid);
+          else window.ublCallAnalysis.downloadAnalysis(cid);
+        });
+      }
+      bindDownload("downloadAnalysisBtn", false);
+      bindDownload("downloadTranscriptBtn", true);
+      bindDownload("modalDownloadAnalysisBtn", false);
+      bindDownload("modalDownloadTranscriptBtn", true);
+
+      loginForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        loginError.classList.add("hidden");
+        const username = document.getElementById("username").value.trim();
+        const password = document.getElementById("password").value;
+        loginBtn.disabled = true;
+        loginBtn.innerHTML = `<svg class="w-5 h-5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg><span>Signing in...</span>`;
+
+        try {
+          const response = await fetch("/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) });
+          if (response.ok) {
+            const data = await response.json();
+            localStorage.setItem(JWT_TOKEN_KEY, data.token);
+            localStorage.setItem(USER_DATA_KEY, JSON.stringify(data.user));
+            document.getElementById("userFullName").textContent = data.user.full_name;
+            document.getElementById("userInfo").classList.remove("hidden");
+            logoutBtn.classList.remove("hidden");
+            document.getElementById("loginModal").style.display = "none";
+            loginForm.reset();
+            await initializeApp();
+          } else {
+            const error = await response.json();
+            loginErrorMessage.textContent = error.detail || "Invalid username or password";
+            loginError.classList.remove("hidden");
+          }
+        } catch (error) {
+          loginErrorMessage.textContent = "Network error. Please try again.";
+          loginError.classList.remove("hidden");
+        } finally {
+          loginBtn.disabled = false;
+          loginBtn.innerHTML = `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/></svg><span>Sign In</span>`;
+        }
+      });
+
+      logoutBtn.addEventListener("click", () => {
+        localStorage.removeItem(JWT_TOKEN_KEY);
+        localStorage.removeItem(USER_DATA_KEY);
+        document.getElementById("loginModal").style.display = "flex";
+        document.getElementById("userInfo").classList.add("hidden");
+        logoutBtn.classList.add("hidden");
+        if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+      });
+    });
+  </script>
+</body>
+
+</html>

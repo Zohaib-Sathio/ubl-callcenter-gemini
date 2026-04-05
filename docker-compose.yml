@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  ubldigital-callcenter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ubldigital-callcenter-gemini
+    ports:
+      - "6094:6094"
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./recordings:/app/recordings
+      - ./pages:/app/pages
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:6094/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
