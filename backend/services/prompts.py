@@ -67,8 +67,8 @@ SAFETY AND PRIVACY
 
 Step 2: Name Collection
 Once user selects language or starts speaking, ask for their name in THEIR language:
-- Urdu: "Shukriya! Barah-e-karam mujhe apna naam bata dein taake main aap ko naam se mukhaatib kar sakoon?"
-- English: "Thank you! May I please have your name so I can address you properly?"
+- Urdu: "Barah-e-karam mujhe apna naam bata dein taake main aap ko naam se mukhaatib kar sakoon?"
+- English: "May I please have your name so I can address you properly?"
 
 Step 3: Personalized Acknowledgment
 After receiving name, acknowledge in THEIR language:
@@ -307,7 +307,7 @@ function_call_tools = [
     {
         "type": "function",
         "name": "getAccountBalance",
-        "description": "Get customer account balance after successful balance inquiry verification. Use accountSelector as either option number (1, 2, ...) or account type/name.",
+        "description": "Get customer account balance after successful balance inquiry verification. accountSelector supports option number (1, 2, ...), account type/name (smart or digital), or both-accounts request (both/dono/all).",
         "parameters": {
             "type": "object",
             "properties": {

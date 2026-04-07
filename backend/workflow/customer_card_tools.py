@@ -445,14 +445,41 @@ async def get_account_balance(cnic: str, account_selector: str) -> dict:
             }
 
         selector = str(account_selector or "").strip()
+        selector_lower = selector.lower()
         matched_account = None
+        both_keywords = {"both", "dono", "all", "both accounts", "donon", "2no", "sab"}
+        smart_aliases = {"smart", "smart account", "ubl smart", "asaan", "asaaan", "ubl asaan"}
+        digital_aliases = {"digital", "digital account", "ubl digital", "digital bank", "digital banking account"}
+
+        def _account_payload(account: dict) -> dict:
+            account_number = account.get("account_number", "")
+            return {
+                "account_type": account.get("account_type", ""),
+                "masked_account_number": f"****{account_number[-4:]}" if account_number else "N/A",
+                "balance_pkr": account.get("balance_pkr", 0),
+            }
+
+        if selector_lower in both_keywords:
+            account_items = [_account_payload(account) for account in accounts]
+            return {
+                "success": True,
+                "customer_name": customer_data.get("full_name", ""),
+                "requested_scope": "both_accounts",
+                "accounts": account_items,
+                "message": "Balances for all linked accounts retrieved successfully.",
+            }
 
         if selector.isdigit():
             idx = int(selector) - 1
             if 0 <= idx < len(accounts):
                 matched_account = accounts[idx]
         else:
-            normalized_selector = selector.lower()
+            normalized_selector = selector_lower
+            if normalized_selector in smart_aliases:
+                normalized_selector = "smart"
+            elif normalized_selector in digital_aliases:
+                normalized_selector = "digital"
+
             exact = [a for a in accounts if a.get("account_type", "").lower() == normalized_selector]
             if exact:
                 matched_account = exact[0]
@@ -478,15 +505,14 @@ async def get_account_balance(cnic: str, account_selector: str) -> dict:
                 "available_accounts": options,
             }
 
-        account_number = matched_account.get("account_number", "")
-        masked_account_number = f"****{account_number[-4:]}" if account_number else "N/A"
+        account_data = _account_payload(matched_account)
 
         return {
             "success": True,
             "customer_name": customer_data.get("full_name", ""),
-            "account_type": matched_account.get("account_type", ""),
-            "masked_account_number": masked_account_number,
-            "balance_pkr": matched_account.get("balance_pkr", 0),
+            "account_type": account_data["account_type"],
+            "masked_account_number": account_data["masked_account_number"],
+            "balance_pkr": account_data["balance_pkr"],
             "message": "Account balance retrieved successfully.",
         }
 

@@ -101,14 +101,16 @@ WORKFLOW_REGISTRY: Dict[str, WorkflowDefinition] = {
         tool_names=[
             "verifyCustomerByCnic",
             "verifyTpin",
+            "getAccountBalance",
             "getCustomerStatus",
         ],
         runbook=(
             "Balance Inquiry Workflow:\n"
             "1) Verify customer with verifyCustomerByCnic.\n"
             "2) Verify TPIN with verifyTpin.\n"
-            "3) Only after successful verification, share permitted account insight.\n"
-            "4) On repeated verification failures, transferToAgent."
+            "3) Ask which account the customer wants (option number or account name).\n"
+            "4) Fetch selected account balance with getAccountBalance.\n"
+            "5) On repeated verification failures, transferToAgent."
         ),
     ),
 }

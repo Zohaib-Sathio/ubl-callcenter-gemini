@@ -368,8 +368,8 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
             if active_workflow == "balance_inquiry" and result.get("success"):
                 result["message"] = (
                     "TPIN verified successfully for balance inquiry. "
-                    "Now ask which account balance the customer wants "
-                    "(option number or account name), then call getAccountBalance."
+                    "Now ask whether the customer wants smart account, digital account, or both accounts. "
+                    "Then call getAccountBalance using option number, account name, or both/dono."
                 )
         
         elif func_name == "verifyCardDetails":
