@@ -640,7 +640,8 @@ function_call_tools = [
 def build_system_message(
     instructions: str = "",
     caller: str = "",
-    voice: str = "sage"
+    voice: str = "sage",
+    workflow_context: str = ""
 ) -> str:
     karachi_tz = ZoneInfo("Asia/Karachi")
     now = datetime.now(karachi_tz)
@@ -657,6 +658,7 @@ def build_system_message(
     language_reminder = ""
 
     caller_line = f"Caller: {caller}\n\n" if caller else ""
+    workflow_line = f"Workflow context:\n{workflow_context}\n\n" if workflow_context else ""
     
     system_prompt = get_gendered_system_prompt(voice)
     
@@ -664,8 +666,8 @@ def build_system_message(
     if instructions:
         print(f"####################################This is a registered call with voice: {voice}")
         context = f"This is a registered caller and their details are as follows:\n{instructions}"
-        return f"{language_reminder}\n{system_prompt}\n{date_line}\n{caller_line}\n{context}"
+        return f"{language_reminder}\n{system_prompt}\n{date_line}\n{caller_line}\n{workflow_line}\n{context}"
     else:
         print(f"####################################This is a non registered call with voice: {voice}")
-        base = f"{language_reminder}\n{system_prompt}\n{date_line}\n{caller_line}"
+        base = f"{language_reminder}\n{system_prompt}\n{date_line}\n{caller_line}\n{workflow_line}"
         return base

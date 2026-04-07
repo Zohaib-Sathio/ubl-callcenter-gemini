@@ -21,7 +21,7 @@ import audioop
 from contextlib import suppress
 import httpx
 
-from backend.services.prompts import function_call_tools, build_system_message
+from backend.services.prompts import build_system_message
 from backend.logger.call_log_apis import *
 from backend.workflow.customer_card_tools import (
     verify_customer_by_cnic,
@@ -34,6 +34,14 @@ from backend.workflow.customer_card_tools import (
     transfer_to_agent,
     get_customer_status,
     reset_verification_attempts,
+)
+from backend.workflow.registry import (
+    WORKFLOW_SELECTOR_TOOL_NAME,
+    get_all_tools_with_selector,
+    get_workflow_policy_context,
+    get_workflow_context,
+    is_tool_allowed_for_workflow,
+    is_valid_workflow,
 )
 from backend.services.rag_tools import search_knowledge_base, prewarm_embeddings
 from backend.services.audio_transcription import transcribe_audio, analyze_call_with_llm
@@ -227,8 +235,42 @@ def generate_silence(duration_sec, sample_rate=8000):
     return silence_pcm
 
 
-async def execute_function_call(func_name: str, func_args: dict) -> dict:
+async def execute_function_call(func_name: str, func_args: dict, call_id: str | None = None) -> dict:
     try:
+        if func_name == WORKFLOW_SELECTOR_TOOL_NAME:
+            workflow_id = func_args.get("workflowId", "")
+            reason = func_args.get("reason", "")
+            if not is_valid_workflow(workflow_id):
+                return {
+                    "success": False,
+                    "error": "Invalid workflow",
+                    "message": f"Unknown workflowId '{workflow_id}'. Please choose a valid workflow.",
+                }
+
+            if call_id and call_id in call_metadata:
+                call_metadata[call_id]["active_workflow"] = workflow_id
+                call_metadata[call_id]["workflow_selection_reason"] = reason
+
+            return {
+                "success": True,
+                "workflowId": workflow_id,
+                "reason": reason,
+                "workflowContext": get_workflow_context(workflow_id),
+                "message": f"Workflow selected: {workflow_id}",
+            }
+
+        active_workflow = call_metadata.get(call_id, {}).get("active_workflow") if call_id else None
+        if not is_tool_allowed_for_workflow(func_name, active_workflow):
+            return {
+                "success": False,
+                "error": "Tool not allowed for active workflow",
+                "active_workflow": active_workflow,
+                "message": (
+                    "This tool is not allowed right now. "
+                    "Call selectWorkflow first (or re-select workflow) before using this tool."
+                ),
+            }
+
         if func_name == "searchKnowledgeBase":
             return await search_knowledge_base(query=func_args.get("query", ""))
         
@@ -355,17 +397,26 @@ async def media_stream_browser(websocket: WebSocket):
         gemini_voice = meta.get("voice", "Charon")  # Now using Gemini voice names directly
         temperature = meta.get("temperature", 0.8)
         
+        workflow_context = get_workflow_policy_context()
+        call_metadata.setdefault(call_id, {})
+        call_metadata[call_id]["active_workflow"] = None
+        all_tools = get_all_tools_with_selector()
+
         SYSTEM_MESSAGE = build_system_message(
             instructions=instructions,
             caller=caller,
-            voice=gemini_voice
+            voice=gemini_voice,
+            workflow_context=workflow_context
         )
         
-        print(f"🔧 Initializing Gemini session with voice: {gemini_voice}, temp: {temperature}")
+        print(
+            f"🔧 Initializing Gemini session with voice: {gemini_voice}, temp: {temperature}, "
+            f"workflow: dynamic-selection, tools: {len(all_tools)}"
+        )
         
         config = GeminiLiveConfig(
             system_instruction=SYSTEM_MESSAGE,
-            tools=function_call_tools,
+            tools=all_tools,
             voice=gemini_voice,
             temperature=temperature
         )
@@ -473,7 +524,7 @@ async def media_stream_browser(websocket: WebSocket):
                                 exec_start = time.time()
                                 try:
                                     result = await asyncio.wait_for(
-                                        execute_function_call(func_name, func_args),
+                                        execute_function_call(func_name, func_args, call_id=call_id),
                                         timeout=30.0
                                     )
                                 except asyncio.TimeoutError:
