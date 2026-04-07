@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from backend.services.prompts import function_call_tools
 
@@ -14,6 +14,13 @@ class WorkflowDefinition:
     trigger_keywords: List[str]
     tool_names: List[str]
     runbook: str
+
+
+@dataclass(frozen=True)
+class WorkflowPhase:
+    id: str
+    allowed_tools: List[str]
+    next_phase: Optional[str] = None
 
 
 GLOBAL_TOOL_NAMES: Set[str] = {"searchKnowledgeBase", "transferToAgent"}
@@ -193,3 +200,104 @@ def is_tool_allowed_for_workflow(tool_name: str, workflow_id: str | None) -> boo
 
 def is_valid_workflow(workflow_id: str) -> bool:
     return workflow_id in WORKFLOW_REGISTRY
+
+
+CARD_ACTIVATION_PHASES: Dict[str, WorkflowPhase] = {
+    "identity": WorkflowPhase(
+        id="identity",
+        allowed_tools=["verifyCustomerByCnic", "getCustomerStatus"],
+        next_phase="custody",
+    ),
+    "custody": WorkflowPhase(
+        id="custody",
+        allowed_tools=["confirmPhysicalCustody", "getCustomerStatus"],
+        next_phase="tpin",
+    ),
+    "tpin": WorkflowPhase(
+        id="tpin",
+        allowed_tools=["verifyTpin", "getCustomerStatus"],
+        next_phase="card_details",
+    ),
+    "card_details": WorkflowPhase(
+        id="card_details",
+        allowed_tools=["verifyCardDetails", "getCustomerStatus"],
+        next_phase="activation",
+    ),
+    "activation": WorkflowPhase(
+        id="activation",
+        allowed_tools=["activateCard", "getCustomerStatus"],
+        next_phase="post_activation",
+    ),
+    "post_activation": WorkflowPhase(
+        id="post_activation",
+        allowed_tools=["transferToIvrForPin", "updateCustomerTpin", "getCustomerStatus"],
+        next_phase=None,
+    ),
+}
+
+
+def get_initial_phase_for_workflow(workflow_id: str) -> Optional[str]:
+    if workflow_id == "card_activation":
+        return "identity"
+    return None
+
+
+def get_required_tool_for_phase(workflow_id: str, phase_id: Optional[str]) -> Optional[str]:
+    if workflow_id != "card_activation" or not phase_id:
+        return None
+    phase = CARD_ACTIVATION_PHASES.get(phase_id)
+    if not phase:
+        return None
+    for tool_name in phase.allowed_tools:
+        if tool_name != "getCustomerStatus":
+            return tool_name
+    return None
+
+
+def is_tool_allowed_in_phase(
+    workflow_id: str,
+    phase_id: Optional[str],
+    tool_name: str,
+) -> Tuple[bool, Optional[str]]:
+    if workflow_id != "card_activation":
+        return True, None
+    if not phase_id:
+        return False, "Workflow phase is not initialized."
+
+    phase = CARD_ACTIVATION_PHASES.get(phase_id)
+    if not phase:
+        return False, f"Unknown phase '{phase_id}'."
+
+    if tool_name in GLOBAL_TOOL_NAMES or tool_name == WORKFLOW_SELECTOR_TOOL_NAME:
+        return True, None
+
+    if tool_name in phase.allowed_tools:
+        return True, None
+
+    required_tool = get_required_tool_for_phase(workflow_id, phase_id) or "the next required step"
+    return False, f"Out-of-order tool call. Complete '{required_tool}' first."
+
+
+def get_next_phase_for_tool(
+    workflow_id: str,
+    phase_id: Optional[str],
+    tool_name: str,
+    tool_result: Optional[dict],
+) -> Optional[str]:
+    if workflow_id != "card_activation" or not phase_id:
+        return phase_id
+
+    phase = CARD_ACTIVATION_PHASES.get(phase_id)
+    if not phase:
+        return phase_id
+
+    if tool_name == "getCustomerStatus":
+        return phase_id
+
+    if tool_name not in phase.allowed_tools:
+        return phase_id
+
+    if not (tool_result or {}).get("success", False):
+        return phase_id
+
+    return phase.next_phase or phase_id

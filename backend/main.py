@@ -36,10 +36,14 @@ from backend.workflow.customer_card_tools import (
     reset_verification_attempts,
 )
 from backend.workflow.registry import (
+    get_initial_phase_for_workflow,
+    get_next_phase_for_tool,
     WORKFLOW_SELECTOR_TOOL_NAME,
     get_all_tools_with_selector,
     get_workflow_policy_context,
     get_workflow_context,
+    get_required_tool_for_phase,
+    is_tool_allowed_in_phase,
     is_tool_allowed_for_workflow,
     is_valid_workflow,
 )
@@ -117,6 +121,21 @@ CHANNELS = 1
 RATE = 8000
 
 call_metadata: dict[str, dict] = {}
+
+
+def _record_routing_event(call_id: str | None, event_type: str, payload: dict | None = None) -> None:
+    if not call_id:
+        return
+    if call_id not in call_metadata:
+        call_metadata[call_id] = {}
+    call_metadata[call_id].setdefault("routing_events", [])
+    event = {
+        "ts": time.time(),
+        "event": event_type,
+        "payload": payload or {},
+    }
+    call_metadata[call_id]["routing_events"].append(event)
+    print(f"📍 [ROUTING] call={call_id} event={event_type} payload={json.dumps(event['payload'])}")
 
 @app.get("/", response_class=HTMLResponse)
 async def index_page():
@@ -241,6 +260,7 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
             workflow_id = func_args.get("workflowId", "")
             reason = func_args.get("reason", "")
             if not is_valid_workflow(workflow_id):
+                _record_routing_event(call_id, "workflow_selection_invalid", {"workflowId": workflow_id})
                 return {
                     "success": False,
                     "error": "Invalid workflow",
@@ -248,19 +268,41 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                 }
 
             if call_id and call_id in call_metadata:
+                previous = call_metadata[call_id].get("active_workflow")
                 call_metadata[call_id]["active_workflow"] = workflow_id
                 call_metadata[call_id]["workflow_selection_reason"] = reason
+                call_metadata[call_id]["workflow_phase"] = get_initial_phase_for_workflow(workflow_id)
+                if previous and previous != workflow_id:
+                    _record_routing_event(
+                        call_id,
+                        "workflow_reselected",
+                        {"from": previous, "to": workflow_id, "reason": reason},
+                    )
+                else:
+                    _record_routing_event(
+                        call_id,
+                        "workflow_selected",
+                        {"workflow": workflow_id, "reason": reason},
+                    )
 
             return {
                 "success": True,
                 "workflowId": workflow_id,
                 "reason": reason,
                 "workflowContext": get_workflow_context(workflow_id),
+                "phase": get_initial_phase_for_workflow(workflow_id),
                 "message": f"Workflow selected: {workflow_id}",
             }
 
         active_workflow = call_metadata.get(call_id, {}).get("active_workflow") if call_id else None
         if not is_tool_allowed_for_workflow(func_name, active_workflow):
+            if call_id and call_id in call_metadata:
+                call_metadata[call_id]["blocked_tool_attempts"] = call_metadata[call_id].get("blocked_tool_attempts", 0) + 1
+            _record_routing_event(
+                call_id,
+                "tool_blocked_by_workflow",
+                {"tool": func_name, "active_workflow": active_workflow},
+            )
             return {
                 "success": False,
                 "error": "Tool not allowed for active workflow",
@@ -271,60 +313,113 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                 ),
             }
 
+        current_phase = call_metadata.get(call_id, {}).get("workflow_phase") if call_id else None
+        allowed_in_phase, phase_error = is_tool_allowed_in_phase(
+            active_workflow or "",
+            current_phase,
+            func_name,
+        )
+        if not allowed_in_phase:
+            if call_id and call_id in call_metadata:
+                call_metadata[call_id]["blocked_tool_attempts"] = call_metadata[call_id].get("blocked_tool_attempts", 0) + 1
+            required_tool = get_required_tool_for_phase(active_workflow or "", current_phase)
+            _record_routing_event(
+                call_id,
+                "tool_blocked_by_phase",
+                {
+                    "tool": func_name,
+                    "active_workflow": active_workflow,
+                    "phase": current_phase,
+                    "required_tool": required_tool,
+                },
+            )
+            return {
+                "success": False,
+                "error": "Tool not allowed for current workflow phase",
+                "active_workflow": active_workflow,
+                "phase": current_phase,
+                "required_tool": required_tool,
+                "message": phase_error or "This step is out of sequence for the current workflow phase.",
+            }
+
+        result: dict
         if func_name == "searchKnowledgeBase":
-            return await search_knowledge_base(query=func_args.get("query", ""))
+            result = await search_knowledge_base(query=func_args.get("query", ""))
         
         elif func_name == "verifyCustomerByCnic":
-            return await verify_customer_by_cnic(cnic=func_args.get("cnic", ""))
+            result = await verify_customer_by_cnic(cnic=func_args.get("cnic", ""))
         
         elif func_name == "confirmPhysicalCustody":
             has_card_str = str(func_args.get("hasCard", "false")).lower()
             has_card = has_card_str in ("true", "yes", "1")
-            return await confirm_physical_custody(
+            result = await confirm_physical_custody(
                 cnic=func_args.get("cnic", ""),
                 has_card=has_card
             )
         
         elif func_name == "verifyTpin":
-            return await verify_tpin(
+            result = await verify_tpin(
                 cnic=func_args.get("cnic", ""),
                 tpin=func_args.get("tpin", "")
             )
         
         elif func_name == "verifyCardDetails":
-            return await verify_card_details(
+            result = await verify_card_details(
                 cnic=func_args.get("cnic", ""),
                 last_four_digits=func_args.get("lastFourDigits", ""),
                 expiry_date=func_args.get("expiryDate", "")
             )
         
         elif func_name == "activateCard":
-            return await activate_card(cnic=func_args.get("cnic", ""))
+            result = await activate_card(cnic=func_args.get("cnic", ""))
         
         elif func_name == "updateCustomerTpin":
-            return await update_customer_tpin(
+            result = await update_customer_tpin(
                 cnic=func_args.get("cnic", ""),
                 new_tpin=func_args.get("newTpin", "")
             )
         
         elif func_name == "transferToIvrForPin":
-            return await transfer_to_ivr_for_pin()
+            result = await transfer_to_ivr_for_pin()
         
         elif func_name == "transferToAgent":
-            return await transfer_to_agent(
+            result = await transfer_to_agent(
                 cnic=func_args.get("cnic", ""),
                 reason=func_args.get("reason", "")
             )
         
         elif func_name == "getCustomerStatus":
-            return await get_customer_status(cnic=func_args.get("cnic", ""))
+            result = await get_customer_status(cnic=func_args.get("cnic", ""))
         
         else:
-            return {
+            result = {
                 "success": False,
                 "error": f"Unknown function: {func_name}",
                 "message": "Function not found in the system."
             }
+
+        if call_id and call_id in call_metadata and active_workflow:
+            previous_phase = call_metadata[call_id].get("workflow_phase")
+            next_phase = get_next_phase_for_tool(
+                active_workflow,
+                previous_phase,
+                func_name,
+                result,
+            )
+            if next_phase != previous_phase:
+                call_metadata[call_id]["workflow_phase"] = next_phase
+                _record_routing_event(
+                    call_id,
+                    "workflow_phase_advanced",
+                    {
+                        "workflow": active_workflow,
+                        "from": previous_phase,
+                        "to": next_phase,
+                        "tool": func_name,
+                    },
+                )
+
+        return result
     
     except Exception as e:
         print(f"❌ Error executing function {func_name}: {str(e)}")
@@ -400,6 +495,10 @@ async def media_stream_browser(websocket: WebSocket):
         workflow_context = get_workflow_policy_context()
         call_metadata.setdefault(call_id, {})
         call_metadata[call_id]["active_workflow"] = None
+        call_metadata[call_id]["workflow_phase"] = None
+        call_metadata[call_id]["workflow_selection_reason"] = ""
+        call_metadata[call_id]["routing_events"] = []
+        call_metadata[call_id]["blocked_tool_attempts"] = 0
         all_tools = get_all_tools_with_selector()
 
         SYSTEM_MESSAGE = build_system_message(
