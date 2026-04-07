@@ -235,17 +235,45 @@ CARD_ACTIVATION_PHASES: Dict[str, WorkflowPhase] = {
     ),
 }
 
+BALANCE_INQUIRY_PHASES: Dict[str, WorkflowPhase] = {
+    "identity": WorkflowPhase(
+        id="identity",
+        allowed_tools=["verifyCustomerByCnic", "getCustomerStatus"],
+        next_phase="tpin",
+    ),
+    "tpin": WorkflowPhase(
+        id="tpin",
+        allowed_tools=["verifyTpin", "getCustomerStatus"],
+        next_phase="balance_response",
+    ),
+    "balance_response": WorkflowPhase(
+        id="balance_response",
+        allowed_tools=["getCustomerStatus"],
+        next_phase=None,
+    ),
+}
+
 
 def get_initial_phase_for_workflow(workflow_id: str) -> Optional[str]:
     if workflow_id == "card_activation":
+        return "identity"
+    if workflow_id == "balance_inquiry":
         return "identity"
     return None
 
 
 def get_required_tool_for_phase(workflow_id: str, phase_id: Optional[str]) -> Optional[str]:
-    if workflow_id != "card_activation" or not phase_id:
+    if not phase_id:
         return None
-    phase = CARD_ACTIVATION_PHASES.get(phase_id)
+    phase_map = None
+    if workflow_id == "card_activation":
+        phase_map = CARD_ACTIVATION_PHASES
+    elif workflow_id == "balance_inquiry":
+        phase_map = BALANCE_INQUIRY_PHASES
+    if not phase_map:
+        return None
+
+    phase = phase_map.get(phase_id)
     if not phase:
         return None
     for tool_name in phase.allowed_tools:
@@ -259,12 +287,18 @@ def is_tool_allowed_in_phase(
     phase_id: Optional[str],
     tool_name: str,
 ) -> Tuple[bool, Optional[str]]:
-    if workflow_id != "card_activation":
+    phase_map = None
+    if workflow_id == "card_activation":
+        phase_map = CARD_ACTIVATION_PHASES
+    elif workflow_id == "balance_inquiry":
+        phase_map = BALANCE_INQUIRY_PHASES
+
+    if not phase_map:
         return True, None
     if not phase_id:
         return False, "Workflow phase is not initialized."
 
-    phase = CARD_ACTIVATION_PHASES.get(phase_id)
+    phase = phase_map.get(phase_id)
     if not phase:
         return False, f"Unknown phase '{phase_id}'."
 
@@ -284,10 +318,18 @@ def get_next_phase_for_tool(
     tool_name: str,
     tool_result: Optional[dict],
 ) -> Optional[str]:
-    if workflow_id != "card_activation" or not phase_id:
+    if not phase_id:
         return phase_id
 
-    phase = CARD_ACTIVATION_PHASES.get(phase_id)
+    phase_map = None
+    if workflow_id == "card_activation":
+        phase_map = CARD_ACTIVATION_PHASES
+    elif workflow_id == "balance_inquiry":
+        phase_map = BALANCE_INQUIRY_PHASES
+    if not phase_map:
+        return phase_id
+
+    phase = phase_map.get(phase_id)
     if not phase:
         return phase_id
 
