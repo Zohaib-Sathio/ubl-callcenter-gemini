@@ -168,7 +168,7 @@ async def verify_tpin(cnic: str, tpin: str) -> dict:
                 "tpin_verified": True,
                 "attempts": attempts,
                 "max_attempts": max_attempts,
-                "message": "TPIN verified successfully. Proceeding with card details verification."
+                "message": "TPIN verified successfully."
             }
         else:
             remaining_attempts = max_attempts - attempts

@@ -308,8 +308,10 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                 "error": "Tool not allowed for active workflow",
                 "active_workflow": active_workflow,
                 "message": (
-                    "This tool is not allowed right now. "
-                    "Call selectWorkflow first (or re-select workflow) before using this tool."
+                    "This tool is not allowed for the active workflow. "
+                    f"Active workflow is '{active_workflow}'. "
+                    "Do not request card details or IVR for balance inquiry. "
+                    "Continue with the next allowed step for the current workflow."
                 ),
             }
 
@@ -362,6 +364,11 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                 cnic=func_args.get("cnic", ""),
                 tpin=func_args.get("tpin", "")
             )
+            if active_workflow == "balance_inquiry" and result.get("success"):
+                result["message"] = (
+                    "TPIN verified successfully for balance inquiry. "
+                    "Do not ask for card details. Proceed to balance response."
+                )
         
         elif func_name == "verifyCardDetails":
             result = await verify_card_details(

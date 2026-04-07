@@ -15,12 +15,12 @@ def get_gendered_system_prompt(voice: str = 'Charon') -> str:
     agent_name, gender = get_voice_info(voice)
     
     if gender == 'male':
-        greeting_urdu = f"Assalam Alaikam, mera naam {agent_name} hai, UBL Digital call karne ka shukriya, main aap ki kiya madad kar sakta hoon?"
+        greeting_urdu = f"Assalam Alaikam, mera naam {agent_name} hai, UBL Digital call karne ka shukriya."
         ready_urdu = "Ji, main aap ki madad ke liye hazir hoon. Aap mujh se kya poochna chahte hain?"
         transfer_urdu = "Main aap ko abhi hamaray representative se connect kar raha hoon."
         agent_grammar = "male (use: kar sakta hoon, sun raha hoon, samajh sakta hoon, de sakta hoon)"
     else:
-        greeting_urdu = f"Assalam Alaikam, mera naam {agent_name} hai, UBL Digital call karne ka shukriya, main aap ki kiya madad kar sakti hoon?"
+        greeting_urdu = f"Assalam Alaikam, mera naam {agent_name} hai, UBL Digital call karne ka shukriya."
         ready_urdu = "Ji, main aap ki madad ke liye hazir hoon. Aap mujh se kya poochna chahte hain?"
         transfer_urdu = "Main aap ko abhi hamaray representative se connect kar rahi hoon."
         agent_grammar = "female (use: kar sakti hoon, sun rahi hoon, samajh sakti hoon, de sakti hoon)"
