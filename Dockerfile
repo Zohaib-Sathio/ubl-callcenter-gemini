@@ -15,6 +15,6 @@ COPY . .
 
 RUN mkdir -p recordings/user recordings/agent recordings/analysis
 
-EXPOSE 6094
+EXPOSE 7016
 
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "6094", "--reload"]
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "7016", "--reload"]
