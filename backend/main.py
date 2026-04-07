@@ -138,6 +138,58 @@ def _record_routing_event(call_id: str | None, event_type: str, payload: dict | 
     call_metadata[call_id]["routing_events"].append(event)
     print(f"📍 [ROUTING] call={call_id} event={event_type} payload={json.dumps(event['payload'])}")
 
+
+def _init_conversation_state(call_id: str) -> None:
+    call_metadata.setdefault(call_id, {})
+    call_metadata[call_id].setdefault("conversation_memory", [])
+    call_metadata[call_id].setdefault("question_queue", [])
+    call_metadata[call_id].setdefault("answered_questions", [])
+    call_metadata[call_id].setdefault("last_user_turns", [])
+    call_metadata[call_id].setdefault("conversation_summary", "")
+
+
+def _update_conversation_state(call_id: str, operation: str, payload: dict) -> dict:
+    _init_conversation_state(call_id)
+    state = call_metadata[call_id]
+    payload = payload or {}
+
+    if operation == "add_pending_questions":
+        questions = payload.get("questions", [])
+        if not isinstance(questions, list):
+            return {"success": False, "error": "Invalid payload", "message": "questions must be a list."}
+        for q in questions:
+            if isinstance(q, str) and q.strip():
+                state["question_queue"].append({"question": q.strip(), "status": "pending"})
+        return {"success": True, "message": "Pending questions updated."}
+
+    if operation == "mark_answered":
+        answered = payload.get("answered_questions", [])
+        if not isinstance(answered, list):
+            return {"success": False, "error": "Invalid payload", "message": "answered_questions must be a list."}
+        normalized_answered = {a.strip().lower() for a in answered if isinstance(a, str) and a.strip()}
+        if normalized_answered:
+            remaining = []
+            for item in state["question_queue"]:
+                q_text = str(item.get("question", "")).strip()
+                if q_text.lower() in normalized_answered:
+                    state["answered_questions"].append({"question": q_text, "status": "answered"})
+                else:
+                    remaining.append(item)
+            state["question_queue"] = remaining
+        return {"success": True, "message": "Answered questions marked."}
+
+    if operation == "set_summary":
+        summary = str(payload.get("summary", "")).strip()
+        topics = payload.get("topics_discussed", [])
+        state["conversation_summary"] = summary
+        if isinstance(topics, list):
+            for topic in topics:
+                if isinstance(topic, str) and topic.strip():
+                    state["conversation_memory"].append(topic.strip())
+        return {"success": True, "message": "Conversation summary updated."}
+
+    return {"success": False, "error": "Unknown operation", "message": f"Unsupported operation: {operation}"}
+
 @app.get("/", response_class=HTMLResponse)
 async def index_page():
     with open(STATIC_DIR / "voice-client.html", "r", encoding="utf-8") as f:
@@ -188,6 +240,7 @@ async def start_browser_call(request: Request, payload: dict = Body(...)):
         "temperature": temperature,
         "speed": speed
     }
+    _init_conversation_state(call_id)
     await update_call_status(int(call_id), "pick")
     return {
         "call_id": call_id, 
@@ -215,6 +268,7 @@ async def handle_incoming_call(request: Request):
         "temperature": 0.8,
         "speed": 1.05
     }
+    _init_conversation_state(call_id)
     
     response = VoiceResponse()
     response.say("This call may be recorded for quality purposes.", voice='Polly.Danielle-Generative', language='en-US')
@@ -293,6 +347,27 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                 "workflowContext": get_workflow_context(workflow_id),
                 "phase": get_initial_phase_for_workflow(workflow_id),
                 "message": f"Workflow selected: {workflow_id}",
+            }
+
+        if func_name == "updateConversationState":
+            if not call_id:
+                return {
+                    "success": False,
+                    "error": "Missing call_id",
+                    "message": "Cannot update conversation state without call context.",
+                }
+            operation = str(func_args.get("operation", "")).strip()
+            payload = func_args.get("payload", {})
+            update_result = _update_conversation_state(call_id, operation, payload)
+            state = call_metadata.get(call_id, {})
+            return {
+                **update_result,
+                "state": {
+                    "conversation_summary": state.get("conversation_summary", ""),
+                    "topics_discussed": state.get("conversation_memory", []),
+                    "pending_questions": state.get("question_queue", []),
+                    "answered_questions": state.get("answered_questions", []),
+                },
             }
 
         active_workflow = call_metadata.get(call_id, {}).get("active_workflow") if call_id else None
@@ -509,6 +584,7 @@ async def media_stream_browser(websocket: WebSocket):
         
         workflow_context = get_workflow_policy_context()
         call_metadata.setdefault(call_id, {})
+        _init_conversation_state(call_id)
         call_metadata[call_id]["active_workflow"] = None
         call_metadata[call_id]["workflow_phase"] = None
         call_metadata[call_id]["workflow_selection_reason"] = ""
@@ -794,7 +870,11 @@ async def media_stream_browser(websocket: WebSocket):
             transcripts_output = {
                 "call_id": call_id,
                 "user_transcript": user_transcript,
-                "agent_transcript": agent_transcript
+                "agent_transcript": agent_transcript,
+                "conversation_summary": call_metadata.get(call_id, {}).get("conversation_summary", ""),
+                "topics_discussed": call_metadata.get(call_id, {}).get("conversation_memory", []),
+                "pending_questions": call_metadata.get(call_id, {}).get("question_queue", []),
+                "answered_questions": call_metadata.get(call_id, {}).get("answered_questions", []),
             }
             
             print(f"📝 Transcripts saved for call {call_id}")
