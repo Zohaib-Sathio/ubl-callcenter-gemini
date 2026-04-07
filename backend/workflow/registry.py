@@ -248,7 +248,7 @@ BALANCE_INQUIRY_PHASES: Dict[str, WorkflowPhase] = {
     ),
     "balance_response": WorkflowPhase(
         id="balance_response",
-        allowed_tools=["getCustomerStatus"],
+        allowed_tools=["getAccountBalance", "getCustomerStatus"],
         next_phase=None,
     ),
 }

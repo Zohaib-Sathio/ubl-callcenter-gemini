@@ -303,6 +303,25 @@ function_call_tools = [
             },
             "required": ["cnic"]
         }
+    },
+    {
+        "type": "function",
+        "name": "getAccountBalance",
+        "description": "Get customer account balance after successful balance inquiry verification. Use accountSelector as either option number (1, 2, ...) or account type/name.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cnic": {
+                    "type": "string",
+                    "description": "Customer's CNIC number"
+                },
+                "accountSelector": {
+                    "type": "string",
+                    "description": "Selected account identifier: option number or account type/name."
+                }
+            },
+            "required": ["cnic", "accountSelector"]
+        }
     }
 ]
 

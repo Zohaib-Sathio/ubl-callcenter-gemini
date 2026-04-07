@@ -33,6 +33,7 @@ from backend.workflow.customer_card_tools import (
     transfer_to_ivr_for_pin,
     transfer_to_agent,
     get_customer_status,
+    get_account_balance,
     reset_verification_attempts,
 )
 from backend.workflow.registry import (
@@ -367,7 +368,8 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
             if active_workflow == "balance_inquiry" and result.get("success"):
                 result["message"] = (
                     "TPIN verified successfully for balance inquiry. "
-                    "Do not ask for card details. Proceed to balance response."
+                    "Now ask which account balance the customer wants "
+                    "(option number or account name), then call getAccountBalance."
                 )
         
         elif func_name == "verifyCardDetails":
@@ -397,6 +399,12 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
         
         elif func_name == "getCustomerStatus":
             result = await get_customer_status(cnic=func_args.get("cnic", ""))
+
+        elif func_name == "getAccountBalance":
+            result = await get_account_balance(
+                cnic=func_args.get("cnic", ""),
+                account_selector=func_args.get("accountSelector", ""),
+            )
         
         else:
             result = {

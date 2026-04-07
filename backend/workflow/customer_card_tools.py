@@ -426,6 +426,78 @@ async def get_customer_status(cnic: str) -> dict:
         }
 
 
+async def get_account_balance(cnic: str, account_selector: str) -> dict:
+    try:
+        customer_data = CUSTOMER_CARDS.get(cnic)
+        if not customer_data:
+            return {
+                "success": False,
+                "error": "Customer not found",
+                "message": "Customer data not found. Please verify CNIC first.",
+            }
+
+        accounts = customer_data.get("accounts", [])
+        if not accounts:
+            return {
+                "success": False,
+                "error": "No accounts found",
+                "message": "No linked accounts were found for this customer.",
+            }
+
+        selector = str(account_selector or "").strip()
+        matched_account = None
+
+        if selector.isdigit():
+            idx = int(selector) - 1
+            if 0 <= idx < len(accounts):
+                matched_account = accounts[idx]
+        else:
+            normalized_selector = selector.lower()
+            exact = [a for a in accounts if a.get("account_type", "").lower() == normalized_selector]
+            if exact:
+                matched_account = exact[0]
+            else:
+                partial = [a for a in accounts if normalized_selector in a.get("account_type", "").lower()]
+                if len(partial) == 1:
+                    matched_account = partial[0]
+                elif len(partial) > 1:
+                    options = [f"{i + 1}. {a.get('account_type', 'Account')}" for i, a in enumerate(accounts)]
+                    return {
+                        "success": False,
+                        "error": "Ambiguous account selector",
+                        "message": "Multiple accounts match. Please choose by account number option.",
+                        "available_accounts": options,
+                    }
+
+        if not matched_account:
+            options = [f"{i + 1}. {a.get('account_type', 'Account')}" for i, a in enumerate(accounts)]
+            return {
+                "success": False,
+                "error": "Invalid account selector",
+                "message": "Invalid account selection. Please choose by option number or valid account name.",
+                "available_accounts": options,
+            }
+
+        account_number = matched_account.get("account_number", "")
+        masked_account_number = f"****{account_number[-4:]}" if account_number else "N/A"
+
+        return {
+            "success": True,
+            "customer_name": customer_data.get("full_name", ""),
+            "account_type": matched_account.get("account_type", ""),
+            "masked_account_number": masked_account_number,
+            "balance_pkr": matched_account.get("balance_pkr", 0),
+            "message": "Account balance retrieved successfully.",
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "An error occurred while retrieving account balance.",
+        }
+
+
 async def reset_verification_attempts(cnic: str) -> dict:
     try:
         customer_data = CUSTOMER_CARDS.get(cnic)
