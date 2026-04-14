@@ -117,11 +117,11 @@ async def confirm_physical_custody(cnic: str, has_card: bool) -> dict:
             }
         
         customer_data["debit_card"]["physical_custody_confirmed"] = True
-        
+
         print(f"✅ confirm_physical_custody: Confirmed for {customer_data['full_name']} @ {time.time()}")
         return {
             "success": True,
-            "message": "Physical custody of card confirmed. Proceeding with TPIN verification."
+            "message": "Physical custody of card confirmed. Proceed to the next verification step."
         }
         
     except Exception as e:

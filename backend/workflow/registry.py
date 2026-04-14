@@ -264,6 +264,118 @@ def get_initial_phase_for_workflow(workflow_id: str) -> Optional[str]:
     return None
 
 
+# Maps each phase to the call_verifications key that satisfies it
+_PHASE_VERIFICATION_KEY: Dict[str, Dict[str, str]] = {
+    "card_activation": {
+        "identity": "cnic_verified",
+        "custody": "physical_custody_confirmed",
+        "tpin": "tpin_verified",
+        "card_details": "card_details_verified",
+        "activation": "card_activated",
+    },
+    "balance_inquiry": {
+        "identity": "cnic_verified",
+        "tpin": "tpin_verified",
+    },
+}
+
+# Ordered phase list per workflow (for iteration)
+_PHASE_ORDER: Dict[str, List[str]] = {
+    "card_activation": ["identity", "custody", "tpin", "card_details", "activation", "post_activation"],
+    "balance_inquiry": ["identity", "tpin", "balance_response"],
+}
+
+
+def get_smart_initial_phase(
+    workflow_id: str,
+    call_verifications: Dict[str, object],
+) -> Tuple[Optional[str], List[str]]:
+    """
+    Determine the correct starting phase for a workflow, skipping phases
+    whose verifications were already completed earlier in the call.
+
+    Returns:
+        (starting_phase, list_of_skipped_phase_ids)
+    """
+    phase_order = _PHASE_ORDER.get(workflow_id)
+    if not phase_order:
+        return get_initial_phase_for_workflow(workflow_id), []
+
+    verification_map = _PHASE_VERIFICATION_KEY.get(workflow_id, {})
+    skipped: List[str] = []
+
+    for phase_id in phase_order:
+        ver_key = verification_map.get(phase_id)
+        if ver_key and call_verifications.get(ver_key):
+            skipped.append(phase_id)
+        else:
+            return phase_id, skipped
+
+    # All phases already satisfied — return the last phase
+    return phase_order[-1], skipped
+
+
+def advance_phase_skipping_verified(
+    workflow_id: str,
+    target_phase: Optional[str],
+    call_verifications: Dict[str, object],
+) -> Optional[str]:
+    """
+    Given a target phase to advance to, check if it (and any phases after it)
+    are already verified. Skip forward until we find an unverified phase.
+    """
+    phase_map: Optional[Dict[str, WorkflowPhase]] = None
+    if workflow_id == "card_activation":
+        phase_map = CARD_ACTIVATION_PHASES
+    elif workflow_id == "balance_inquiry":
+        phase_map = BALANCE_INQUIRY_PHASES
+    if not phase_map or not target_phase:
+        return target_phase
+
+    verification_map = _PHASE_VERIFICATION_KEY.get(workflow_id, {})
+
+    # Check target_phase itself first, then walk forward
+    check_id = target_phase
+    while check_id:
+        ver_key = verification_map.get(check_id)
+        if ver_key and call_verifications.get(ver_key):
+            # This phase is already satisfied, try next
+            phase_obj = phase_map.get(check_id)
+            if phase_obj and phase_obj.next_phase:
+                check_id = phase_obj.next_phase
+            else:
+                return check_id  # No more phases, return last one
+        else:
+            return check_id  # Found an unverified phase
+
+    return target_phase
+
+
+def build_verification_context(call_verifications: Dict[str, object]) -> str:
+    """Build a context string telling Gemini what's already verified."""
+    verified_cnic = call_verifications.get("verified_cnic")
+    if not verified_cnic:
+        return ""
+
+    lines = [f"ALREADY VERIFIED IN THIS CALL (do NOT re-ask the customer):"]
+    if call_verifications.get("cnic_verified"):
+        lines.append(f"- CNIC verified: {verified_cnic}")
+    if call_verifications.get("tpin_verified"):
+        lines.append(f"- TPIN verified")
+    if call_verifications.get("physical_custody_confirmed"):
+        lines.append(f"- Physical card custody confirmed")
+    if call_verifications.get("card_details_verified"):
+        lines.append(f"- Card details (last 4 + expiry) verified")
+    if call_verifications.get("card_activated"):
+        lines.append(f"- Card already activated")
+
+    if len(lines) == 1:
+        return ""
+
+    lines.append("Skip these steps and proceed to the next unverified step.")
+    return "\n".join(lines)
+
+
 def get_required_tool_for_phase(workflow_id: str, phase_id: Optional[str]) -> Optional[str]:
     if not phase_id:
         return None

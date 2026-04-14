@@ -47,6 +47,9 @@ from backend.workflow.registry import (
     is_tool_allowed_in_phase,
     is_tool_allowed_for_workflow,
     is_valid_workflow,
+    get_smart_initial_phase,
+    advance_phase_skipping_verified,
+    build_verification_context,
 )
 from backend.services.rag_tools import search_knowledge_base, prewarm_embeddings
 from backend.services.audio_transcription import transcribe_audio, analyze_call_with_llm
@@ -66,6 +69,186 @@ from backend.utils.audio_utils import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = REPO_ROOT / "frontend" / "static"
 RECORDINGS_DIR = REPO_ROOT / "recordings"
+
+
+class TokenTracker:
+    """
+    Estimates token usage per turn and cumulative for a Gemini Live API call.
+
+    Gemini Live API does not expose usage_metadata, so we estimate from
+    observable data: audio duration, transcription text, tool payloads,
+    and the system prompt.
+
+    Rates (from Google docs / empirical):
+      - Audio input:  ~25 tokens/sec at 16 kHz mono 16-bit PCM
+      - Audio output: ~25 tokens/sec at 24 kHz mono 16-bit PCM
+      - Text:         ~1 token per 4 characters (mixed EN/UR average)
+      - JSON payload: ~1 token per 4 characters
+    """
+
+    AUDIO_INPUT_TOKENS_PER_SEC = 25      # 16 kHz, 16-bit mono
+    AUDIO_OUTPUT_TOKENS_PER_SEC = 25     # 24 kHz, 16-bit mono
+    CHARS_PER_TOKEN = 4
+    CONTEXT_WINDOW = 8192                # matches sliding_window target_tokens
+
+    def __init__(self, call_id: str, system_prompt: str, tools_json: list):
+        self.call_id = call_id
+        self.turn_number = 0
+
+        # One-time system cost
+        tools_text = json.dumps(tools_json)
+        self.system_prompt_tokens = len(system_prompt) // self.CHARS_PER_TOKEN
+        self.tools_tokens = len(tools_text) // self.CHARS_PER_TOKEN
+        self.base_tokens = self.system_prompt_tokens + self.tools_tokens
+
+        # Per-turn accumulators (reset each turn)
+        self._turn_input_audio_bytes = 0
+        self._turn_output_audio_bytes = 0
+        self._turn_input_text = ""
+        self._turn_output_text = ""
+        self._turn_tool_calls: list[dict] = []
+
+        # Cumulative totals
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.total_tool_tokens = 0
+        self.total_turns = 0
+
+        # Per-turn history for post-call dump
+        self.turn_history: list[dict] = []
+
+        print(
+            f"🔢 [TOKENS] call={call_id} session_init | "
+            f"system_prompt: ~{self.system_prompt_tokens} | "
+            f"tools: ~{self.tools_tokens} | "
+            f"base_context: ~{self.base_tokens} / {self.CONTEXT_WINDOW}"
+        )
+
+    # -- Accumulate events within a turn --
+
+    def add_input_audio(self, pcm_bytes: int) -> None:
+        self._turn_input_audio_bytes += pcm_bytes
+
+    def add_output_audio(self, pcm_bytes: int) -> None:
+        self._turn_output_audio_bytes += pcm_bytes
+
+    def set_input_transcription(self, text: str) -> None:
+        self._turn_input_text = text
+
+    def set_output_transcription(self, text: str) -> None:
+        self._turn_output_text = text
+
+    def add_tool_call(self, func_name: str, args: dict, result: dict) -> None:
+        args_text = json.dumps(args)
+        result_text = json.dumps(result)
+        tokens = (len(args_text) + len(result_text)) // self.CHARS_PER_TOKEN
+        self._turn_tool_calls.append({
+            "function": func_name,
+            "args_tokens": len(args_text) // self.CHARS_PER_TOKEN,
+            "result_tokens": len(result_text) // self.CHARS_PER_TOKEN,
+            "total_tokens": tokens,
+        })
+
+    # -- Audio duration helpers --
+
+    def _audio_seconds(self, pcm_bytes: int, sample_rate: int) -> float:
+        # 16-bit mono = 2 bytes per sample
+        return pcm_bytes / (sample_rate * 2) if pcm_bytes else 0.0
+
+    # -- Finalize a turn --
+
+    def finalize_turn(self) -> dict:
+        self.turn_number += 1
+        self.total_turns += 1
+
+        input_audio_sec = self._audio_seconds(self._turn_input_audio_bytes, 16000)
+        output_audio_sec = self._audio_seconds(self._turn_output_audio_bytes, 24000)
+
+        input_audio_tokens = int(input_audio_sec * self.AUDIO_INPUT_TOKENS_PER_SEC)
+        output_audio_tokens = int(output_audio_sec * self.AUDIO_OUTPUT_TOKENS_PER_SEC)
+        input_text_tokens = len(self._turn_input_text) // self.CHARS_PER_TOKEN
+        output_text_tokens = len(self._turn_output_text) // self.CHARS_PER_TOKEN
+
+        turn_input = input_audio_tokens + input_text_tokens
+        turn_output = output_audio_tokens + output_text_tokens
+        turn_tool = sum(tc["total_tokens"] for tc in self._turn_tool_calls)
+
+        self.total_input_tokens += turn_input
+        self.total_output_tokens += turn_output
+        self.total_tool_tokens += turn_tool
+
+        cumulative = self.base_tokens + self.total_input_tokens + self.total_output_tokens + self.total_tool_tokens
+        utilization = (cumulative / self.CONTEXT_WINDOW * 100) if self.CONTEXT_WINDOW else 0
+
+        turn_data = {
+            "turn": self.turn_number,
+            "input": {
+                "audio_sec": round(input_audio_sec, 2),
+                "audio_tokens": input_audio_tokens,
+                "text_tokens": input_text_tokens,
+                "total": turn_input,
+            },
+            "output": {
+                "audio_sec": round(output_audio_sec, 2),
+                "audio_tokens": output_audio_tokens,
+                "text_tokens": output_text_tokens,
+                "total": turn_output,
+            },
+            "tool_calls": self._turn_tool_calls.copy(),
+            "tool_tokens": turn_tool,
+            "turn_total": turn_input + turn_output + turn_tool,
+            "cumulative": {
+                "input": self.total_input_tokens,
+                "output": self.total_output_tokens,
+                "tools": self.total_tool_tokens,
+                "base": self.base_tokens,
+                "total": cumulative,
+                "context_window": self.CONTEXT_WINDOW,
+                "utilization_pct": round(utilization, 1),
+            },
+        }
+
+        self.turn_history.append(turn_data)
+
+        # Build tool line
+        tool_line = ""
+        if self._turn_tool_calls:
+            tool_names = ", ".join(tc["function"] for tc in self._turn_tool_calls)
+            tool_line = f"\n   tool: ~{turn_tool} tokens ({tool_names})"
+
+        print(
+            f"🔢 [TOKENS] call={self.call_id} turn={self.turn_number}\n"
+            f"   input: ~{turn_input} tokens (audio: ~{input_audio_tokens} [{input_audio_sec:.1f}s], text: ~{input_text_tokens})\n"
+            f"   output: ~{turn_output} tokens (audio: ~{output_audio_tokens} [{output_audio_sec:.1f}s], text: ~{output_text_tokens})"
+            f"{tool_line}\n"
+            f"   turn_total: ~{turn_data['turn_total']} | cumulative: ~{cumulative} / {self.CONTEXT_WINDOW} ({utilization:.0f}%)"
+        )
+
+        # Reset per-turn accumulators
+        self._turn_input_audio_bytes = 0
+        self._turn_output_audio_bytes = 0
+        self._turn_input_text = ""
+        self._turn_output_text = ""
+        self._turn_tool_calls = []
+
+        return turn_data
+
+    def get_summary(self) -> dict:
+        cumulative = self.base_tokens + self.total_input_tokens + self.total_output_tokens + self.total_tool_tokens
+        return {
+            "call_id": self.call_id,
+            "total_turns": self.total_turns,
+            "base_tokens": self.base_tokens,
+            "system_prompt_tokens": self.system_prompt_tokens,
+            "tools_tokens": self.tools_tokens,
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "total_tool_tokens": self.total_tool_tokens,
+            "total_tokens": cumulative,
+            "context_window": self.CONTEXT_WINDOW,
+            "utilization_pct": round(cumulative / self.CONTEXT_WINDOW * 100, 1) if self.CONTEXT_WINDOW else 0,
+            "turn_history": self.turn_history,
+        }
 
 load_dotenv(override=True)
 
@@ -144,8 +327,61 @@ def _init_conversation_state(call_id: str) -> None:
     call_metadata[call_id].setdefault("conversation_memory", [])
     call_metadata[call_id].setdefault("question_queue", [])
     call_metadata[call_id].setdefault("answered_questions", [])
-    call_metadata[call_id].setdefault("last_user_turns", [])
     call_metadata[call_id].setdefault("conversation_summary", "")
+    call_metadata[call_id].setdefault("call_verifications", {
+        "cnic_verified": False,
+        "verified_cnic": None,
+        "tpin_verified": False,
+        "physical_custody_confirmed": False,
+        "card_details_verified": False,
+        "card_activated": False,
+    })
+
+
+def _log_conversation_state(call_id: str, operation: str) -> None:
+    state = call_metadata.get(call_id, {})
+    pending = state.get("question_queue", [])
+    answered = state.get("answered_questions", [])
+    topics = state.get("conversation_memory", [])
+    summary = state.get("conversation_summary", "")
+    print(f"📝 [CONV STATE] call={call_id} op={operation}")
+    print(f"   pending_questions ({len(pending)}): {[q.get('question', '') for q in pending]}")
+    print(f"   answered_questions ({len(answered)}): {[q.get('question', '') for q in answered]}")
+    print(f"   topics ({len(topics)}): {topics}")
+    print(f"   summary: {summary[:120]}{'...' if len(summary) > 120 else ''}")
+
+
+def _is_duplicate_question(existing_questions: list, new_question: str) -> bool:
+    new_lower = new_question.lower()
+    new_words = set(new_lower.split())
+    for item in existing_questions:
+        existing_lower = str(item.get("question", "")).strip().lower()
+        if existing_lower == new_lower:
+            return True
+        if existing_lower in new_lower or new_lower in existing_lower:
+            return True
+        existing_words = set(existing_lower.split())
+        if not new_words or not existing_words:
+            continue
+        overlap = len(new_words & existing_words) / max(len(new_words), len(existing_words))
+        if overlap >= 0.7:
+            return True
+    return False
+
+
+def _fuzzy_match_question(pending_text: str, answered_text: str) -> bool:
+    p = pending_text.lower()
+    a = answered_text.lower()
+    if p == a:
+        return True
+    if p in a or a in p:
+        return True
+    p_words = set(p.split())
+    a_words = set(a.split())
+    if not p_words or not a_words:
+        return False
+    overlap = len(p_words & a_words) / max(len(p_words), len(a_words))
+    return overlap >= 0.6
 
 
 def _update_conversation_state(call_id: str, operation: str, payload: dict) -> dict:
@@ -153,39 +389,69 @@ def _update_conversation_state(call_id: str, operation: str, payload: dict) -> d
     state = call_metadata[call_id]
     payload = payload or {}
 
+    if operation == "get_state":
+        _log_conversation_state(call_id, "get_state")
+        return {"success": True, "message": "Current conversation state retrieved."}
+
     if operation == "add_pending_questions":
         questions = payload.get("questions", [])
         if not isinstance(questions, list):
             return {"success": False, "error": "Invalid payload", "message": "questions must be a list."}
+        added = []
+        skipped = []
         for q in questions:
             if isinstance(q, str) and q.strip():
-                state["question_queue"].append({"question": q.strip(), "status": "pending"})
-        return {"success": True, "message": "Pending questions updated."}
+                q_clean = q.strip()
+                if _is_duplicate_question(state["question_queue"], q_clean):
+                    skipped.append(q_clean)
+                else:
+                    state["question_queue"].append({"question": q_clean, "status": "pending"})
+                    added.append(q_clean)
+        _log_conversation_state(call_id, "add_pending_questions")
+        return {
+            "success": True,
+            "added": added,
+            "skipped_duplicates": skipped,
+            "message": f"Added {len(added)} question(s), skipped {len(skipped)} duplicate(s).",
+        }
 
     if operation == "mark_answered":
         answered = payload.get("answered_questions", [])
         if not isinstance(answered, list):
             return {"success": False, "error": "Invalid payload", "message": "answered_questions must be a list."}
-        normalized_answered = {a.strip().lower() for a in answered if isinstance(a, str) and a.strip()}
-        if normalized_answered:
-            remaining = []
-            for item in state["question_queue"]:
-                q_text = str(item.get("question", "")).strip()
-                if q_text.lower() in normalized_answered:
+        matched = []
+        remaining = []
+        for item in state["question_queue"]:
+            q_text = str(item.get("question", "")).strip()
+            found = False
+            for a in answered:
+                if isinstance(a, str) and a.strip() and _fuzzy_match_question(q_text, a.strip()):
                     state["answered_questions"].append({"question": q_text, "status": "answered"})
-                else:
-                    remaining.append(item)
-            state["question_queue"] = remaining
-        return {"success": True, "message": "Answered questions marked."}
+                    matched.append(q_text)
+                    found = True
+                    break
+            if not found:
+                remaining.append(item)
+        state["question_queue"] = remaining
+        _log_conversation_state(call_id, "mark_answered")
+        return {
+            "success": True,
+            "matched": matched,
+            "still_pending": [q.get("question", "") for q in remaining],
+            "message": f"Marked {len(matched)} question(s) as answered. {len(remaining)} still pending.",
+        }
 
     if operation == "set_summary":
         summary = str(payload.get("summary", "")).strip()
         topics = payload.get("topics_discussed", [])
         state["conversation_summary"] = summary
         if isinstance(topics, list):
+            existing_lower = {t.lower() for t in state["conversation_memory"]}
             for topic in topics:
-                if isinstance(topic, str) and topic.strip():
+                if isinstance(topic, str) and topic.strip() and topic.strip().lower() not in existing_lower:
                     state["conversation_memory"].append(topic.strip())
+                    existing_lower.add(topic.strip().lower())
+        _log_conversation_state(call_id, "set_summary")
         return {"success": True, "message": "Conversation summary updated."}
 
     return {"success": False, "error": "Unknown operation", "message": f"Unsupported operation: {operation}"}
@@ -326,7 +592,22 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                 previous = call_metadata[call_id].get("active_workflow")
                 call_metadata[call_id]["active_workflow"] = workflow_id
                 call_metadata[call_id]["workflow_selection_reason"] = reason
-                call_metadata[call_id]["workflow_phase"] = get_initial_phase_for_workflow(workflow_id)
+
+                call_vers = call_metadata[call_id].get("call_verifications", {})
+                smart_phase, skipped = get_smart_initial_phase(workflow_id, call_vers)
+                call_metadata[call_id]["workflow_phase"] = smart_phase
+
+                if skipped:
+                    _record_routing_event(
+                        call_id,
+                        "phases_skipped_already_verified",
+                        {"workflow": workflow_id, "skipped": skipped, "starting_at": smart_phase},
+                    )
+                    print(
+                        f"⏭️ [PHASE SKIP] call={call_id} workflow={workflow_id} "
+                        f"skipped={skipped} starting_at={smart_phase}"
+                    )
+
                 if previous and previous != workflow_id:
                     _record_routing_event(
                         call_id,
@@ -340,12 +621,18 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                         {"workflow": workflow_id, "reason": reason},
                     )
 
+            verification_context = build_verification_context(
+                call_metadata.get(call_id, {}).get("call_verifications", {})
+            ) if call_id else ""
+
             return {
                 "success": True,
                 "workflowId": workflow_id,
                 "reason": reason,
                 "workflowContext": get_workflow_context(workflow_id),
-                "phase": get_initial_phase_for_workflow(workflow_id),
+                "phase": smart_phase if call_id else get_initial_phase_for_workflow(workflow_id),
+                "skipped_phases": skipped if call_id else [],
+                "verification_status": verification_context,
                 "message": f"Workflow selected: {workflow_id}",
             }
 
@@ -426,7 +713,12 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
         
         elif func_name == "verifyCustomerByCnic":
             result = await verify_customer_by_cnic(cnic=func_args.get("cnic", ""))
-        
+            if result.get("success") and call_id and call_id in call_metadata:
+                vers = call_metadata[call_id].setdefault("call_verifications", {})
+                vers["cnic_verified"] = True
+                vers["verified_cnic"] = func_args.get("cnic", "")
+                print(f"✅ [VERIFY STATE] call={call_id} cnic_verified=True cnic={vers['verified_cnic']}")
+
         elif func_name == "confirmPhysicalCustody":
             has_card_str = str(func_args.get("hasCard", "false")).lower()
             has_card = has_card_str in ("true", "yes", "1")
@@ -434,28 +726,45 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                 cnic=func_args.get("cnic", ""),
                 has_card=has_card
             )
-        
+            if result.get("success") and call_id and call_id in call_metadata:
+                vers = call_metadata[call_id].setdefault("call_verifications", {})
+                vers["physical_custody_confirmed"] = True
+                print(f"✅ [VERIFY STATE] call={call_id} physical_custody_confirmed=True")
+
         elif func_name == "verifyTpin":
             result = await verify_tpin(
                 cnic=func_args.get("cnic", ""),
                 tpin=func_args.get("tpin", "")
             )
-            if active_workflow == "balance_inquiry" and result.get("success"):
-                result["message"] = (
-                    "TPIN verified successfully for balance inquiry. "
-                    "Now ask whether the customer wants smart account, digital account, or both accounts. "
-                    "Then call getAccountBalance using option number, account name, or both/dono."
-                )
-        
+            if result.get("success"):
+                if call_id and call_id in call_metadata:
+                    vers = call_metadata[call_id].setdefault("call_verifications", {})
+                    vers["tpin_verified"] = True
+                    print(f"✅ [VERIFY STATE] call={call_id} tpin_verified=True")
+                if active_workflow == "balance_inquiry":
+                    result["message"] = (
+                        "TPIN verified successfully for balance inquiry. "
+                        "Now ask whether the customer wants smart account, digital account, or both accounts. "
+                        "Then call getAccountBalance using option number, account name, or both/dono."
+                    )
+
         elif func_name == "verifyCardDetails":
             result = await verify_card_details(
                 cnic=func_args.get("cnic", ""),
                 last_four_digits=func_args.get("lastFourDigits", ""),
                 expiry_date=func_args.get("expiryDate", "")
             )
-        
+            if result.get("success") and call_id and call_id in call_metadata:
+                vers = call_metadata[call_id].setdefault("call_verifications", {})
+                vers["card_details_verified"] = True
+                print(f"✅ [VERIFY STATE] call={call_id} card_details_verified=True")
+
         elif func_name == "activateCard":
             result = await activate_card(cnic=func_args.get("cnic", ""))
+            if result.get("success") and call_id and call_id in call_metadata:
+                vers = call_metadata[call_id].setdefault("call_verifications", {})
+                vers["card_activated"] = True
+                print(f"✅ [VERIFY STATE] call={call_id} card_activated=True")
         
         elif func_name == "updateCustomerTpin":
             result = await update_customer_tpin(
@@ -497,14 +806,58 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                 result,
             )
             if next_phase != previous_phase:
-                call_metadata[call_id]["workflow_phase"] = next_phase
+                # Check if we can skip further ahead past already-verified phases
+                call_vers = call_metadata[call_id].get("call_verifications", {})
+                final_phase = advance_phase_skipping_verified(
+                    active_workflow, next_phase, call_vers
+                )
+                # If we skipped additional phases beyond the normal advance,
+                # override the result message so Gemini knows the actual next step
+                if final_phase != next_phase:
+                    skipped_names = []
+                    walk = next_phase
+                    phase_map = None
+                    if active_workflow == "card_activation":
+                        from backend.workflow.registry import CARD_ACTIVATION_PHASES as _pm
+                        phase_map = _pm
+                    elif active_workflow == "balance_inquiry":
+                        from backend.workflow.registry import BALANCE_INQUIRY_PHASES as _pm
+                        phase_map = _pm
+                    if phase_map:
+                        while walk and walk != final_phase:
+                            skipped_names.append(walk)
+                            p = phase_map.get(walk)
+                            walk = p.next_phase if p else None
+
+                    next_tool = get_required_tool_for_phase(active_workflow, final_phase)
+                    result["message"] = (
+                        f"{result.get('message', '')} "
+                        f"NOTE: Phases {skipped_names} were already verified earlier in this call and have been skipped. "
+                        f"Current phase is now '{final_phase}'. "
+                        f"Proceed directly with '{next_tool or 'the next step'}'. "
+                        f"Do NOT ask the customer for previously verified information."
+                    )
+                    _record_routing_event(
+                        call_id,
+                        "phases_auto_skipped",
+                        {
+                            "workflow": active_workflow,
+                            "normal_next": next_phase,
+                            "skipped_to": final_phase,
+                        },
+                    )
+                    print(
+                        f"⏭️ [PHASE SKIP] call={call_id} after {func_name}: "
+                        f"{previous_phase} → {next_phase} → skipped to {final_phase}"
+                    )
+                call_metadata[call_id]["workflow_phase"] = final_phase
                 _record_routing_event(
                     call_id,
                     "workflow_phase_advanced",
                     {
                         "workflow": active_workflow,
                         "from": previous_phase,
-                        "to": next_phase,
+                        "to": final_phase,
                         "tool": func_name,
                     },
                 )
@@ -538,14 +891,16 @@ async def media_stream_browser(websocket: WebSocket):
     
     user_pcm_buffer = io.BytesIO()
     agent_pcm_buffer = io.BytesIO()
-    
+
     function_call_completed_time = None
     FUNCTION_CALL_GRACE_PERIOD = 3.0
-    
+
     _tool_call_received_at = None
     _tool_func_name = None
     _tool_response_sent_at = None
     _first_audio_after_tool = True
+
+    token_tracker: TokenTracker | None = None
     
     try:
         # Wait for the start event with authentication
@@ -599,11 +954,13 @@ async def media_stream_browser(websocket: WebSocket):
             workflow_context=workflow_context
         )
         
+        token_tracker = TokenTracker(call_id, SYSTEM_MESSAGE, all_tools)
+
         print(
             f"🔧 Initializing Gemini session with voice: {gemini_voice}, temp: {temperature}, "
             f"workflow: dynamic-selection, tools: {len(all_tools)}"
         )
-        
+
         config = GeminiLiveConfig(
             system_instruction=SYSTEM_MESSAGE,
             tools=all_tools,
@@ -637,11 +994,14 @@ async def media_stream_browser(websocket: WebSocket):
                             payload_b64 = data["media"]["payload"]
                             pcm_data = base64.b64decode(payload_b64)
                             user_pcm_buffer.write(pcm_data)
-                            
+
+                            if token_tracker:
+                                token_tracker.add_input_audio(len(pcm_data))
+
                             # Passthrough to Gemini (16kHz -> 16kHz, no conversion needed)
                             # This eliminates resampling overhead for lower latency
                             pcm_16khz = convert_browser_to_gemini(pcm_data, input_rate=16000)
-                            
+
                             # Send to Gemini immediately
                             await gemini_client.send_audio(pcm_16khz)
                         
@@ -685,7 +1045,10 @@ async def media_stream_browser(websocket: WebSocket):
                             
                             pcm_24khz = response.audio_data
                             agent_pcm_buffer.write(pcm_24khz)
-                            
+
+                            if token_tracker:
+                                token_tracker.add_output_audio(len(pcm_24khz))
+
                             pcm_b64 = base64.b64encode(pcm_24khz).decode('utf-8')
                             out = {
                                 "event": "media",
@@ -727,7 +1090,10 @@ async def media_stream_browser(websocket: WebSocket):
                                 exec_ms = (time.time() - exec_start) * 1000
                                 
                                 print(f"✅ Function result: {result}")
-                                
+
+                                if token_tracker:
+                                    token_tracker.add_tool_call(func_name, func_args, result)
+
                                 send_start = time.time()
                                 await gemini_client.send_tool_response([{
                                     "id": func_id,
@@ -768,12 +1134,19 @@ async def media_stream_browser(websocket: WebSocket):
                             if function_call_completed_time is not None:
                                 print(f"✅ Response completed, clearing function call flag")
                                 function_call_completed_time = None
-                        
+
+                            if token_tracker:
+                                token_tracker.finalize_turn()
+
                         elif response.type == 'input_transcription':
                             print(f"🎤 User said: {response.transcription}")
-                        
+                            if token_tracker and response.transcription:
+                                token_tracker.set_input_transcription(response.transcription)
+
                         elif response.type == 'output_transcription':
                             print(f"🔊 Agent said: {response.transcription}")
+                            if token_tracker and response.transcription:
+                                token_tracker.set_output_transcription(response.transcription)
                         
                         elif response.type == 'tool_call_cancelled':
                             print(f"⚠️ Tool calls cancelled")
@@ -867,6 +1240,19 @@ async def media_stream_browser(websocket: WebSocket):
                 print(f"⚠️ Could not transcribe agent audio: {e}")
                 agent_transcript = ""
             
+            token_summary = token_tracker.get_summary() if token_tracker else {}
+            if token_summary:
+                ts = token_summary
+                print(
+                    f"🔢 [TOKENS] call={call_id} FINAL SUMMARY\n"
+                    f"   turns: {ts['total_turns']} | base: ~{ts['base_tokens']} "
+                    f"(prompt: ~{ts['system_prompt_tokens']}, tools: ~{ts['tools_tokens']})\n"
+                    f"   input: ~{ts['total_input_tokens']} | output: ~{ts['total_output_tokens']} "
+                    f"| tools: ~{ts['total_tool_tokens']}\n"
+                    f"   total: ~{ts['total_tokens']} / {ts['context_window']} "
+                    f"({ts['utilization_pct']}% utilization)"
+                )
+
             transcripts_output = {
                 "call_id": call_id,
                 "user_transcript": user_transcript,
@@ -875,8 +1261,9 @@ async def media_stream_browser(websocket: WebSocket):
                 "topics_discussed": call_metadata.get(call_id, {}).get("conversation_memory", []),
                 "pending_questions": call_metadata.get(call_id, {}).get("question_queue", []),
                 "answered_questions": call_metadata.get(call_id, {}).get("answered_questions", []),
+                "token_usage": token_summary,
             }
-            
+
             print(f"📝 Transcripts saved for call {call_id}")
             
             analysis_result = await analyze_call_with_llm(call_id, user_transcript, agent_transcript)
