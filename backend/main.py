@@ -625,15 +625,27 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                 call_metadata.get(call_id, {}).get("call_verifications", {})
             ) if call_id else ""
 
+            effective_phase = smart_phase if call_id else get_initial_phase_for_workflow(workflow_id)
+            skipped_list = skipped if call_id else []
+
+            if skipped_list and verification_context:
+                message = (
+                    f"Workflow selected: {workflow_id}. "
+                    f"Phases {skipped_list} were already completed — start directly from phase '{effective_phase}'. "
+                    f"Do NOT re-ask the customer for any previously verified information."
+                )
+            else:
+                message = f"Workflow selected: {workflow_id}"
+
             return {
                 "success": True,
                 "workflowId": workflow_id,
                 "reason": reason,
                 "workflowContext": get_workflow_context(workflow_id),
-                "phase": smart_phase if call_id else get_initial_phase_for_workflow(workflow_id),
-                "skipped_phases": skipped if call_id else [],
+                "phase": effective_phase,
+                "skipped_phases": skipped_list,
                 "verification_status": verification_context,
-                "message": f"Workflow selected: {workflow_id}",
+                "message": message,
             }
 
         if func_name == "updateConversationState":

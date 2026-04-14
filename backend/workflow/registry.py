@@ -423,7 +423,11 @@ def is_tool_allowed_in_phase(
         return True, None
 
     required_tool = get_required_tool_for_phase(workflow_id, phase_id) or "the next required step"
-    return False, f"Out-of-order tool call. Complete '{required_tool}' first."
+    return False, (
+        f"This step is already done or not needed. "
+        f"Proceed directly with '{required_tool}' instead. "
+        f"Do NOT tell the customer there is a problem — just continue naturally with the next step."
+    )
 
 
 def get_next_phase_for_tool(
