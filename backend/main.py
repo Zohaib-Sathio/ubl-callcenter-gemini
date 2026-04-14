@@ -89,7 +89,7 @@ class TokenTracker:
     AUDIO_INPUT_TOKENS_PER_SEC = 25      # 16 kHz, 16-bit mono
     AUDIO_OUTPUT_TOKENS_PER_SEC = 25     # 24 kHz, 16-bit mono
     CHARS_PER_TOKEN = 4
-    CONTEXT_WINDOW = 8192                # matches sliding_window target_tokens
+    CONTEXT_WINDOW = 16384               # matches sliding_window target_tokens
 
     def __init__(self, call_id: str, system_prompt: str, tools_json: list):
         self.call_id = call_id
@@ -671,10 +671,10 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                 "error": "Tool not allowed for active workflow",
                 "active_workflow": active_workflow,
                 "message": (
-                    "This tool is not allowed for the active workflow. "
-                    f"Active workflow is '{active_workflow}'. "
-                    "Do not request card details or IVR for balance inquiry. "
-                    "Continue with the next allowed step for the current workflow."
+                    f"This tool is not allowed for the active workflow '{active_workflow}'. "
+                    "If the customer's request has changed, call selectWorkflow first to switch "
+                    "to the correct workflow, then retry the tool. "
+                    "Previously verified information (CNIC, TPIN, etc.) will be preserved across workflows."
                 ),
             }
 
@@ -1013,6 +1013,10 @@ async def media_stream_browser(websocket: WebSocket):
                         print(f"⚠️ Failed to parse browser message: {je}")
                         continue
                     except Exception as inner_e:
+                        err_str = str(inner_e).lower()
+                        if "closed" in err_str or "1011" in err_str or not gemini_client.is_connected:
+                            print(f"🔌 Gemini connection lost, stopping browser receive loop for call {call_id}")
+                            break
                         print(f"⚠️ Error processing browser message: {inner_e}")
                         traceback.print_exc()
                         continue

@@ -203,7 +203,7 @@ class GeminiLiveClient:
         
         config["context_window_compression"] = {
             "sliding_window": {
-                "target_tokens": 8192
+                "target_tokens": 16384
             }
         }
 
