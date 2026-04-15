@@ -83,8 +83,9 @@ WORKFLOW_REGISTRY: Dict[str, WorkflowDefinition] = {
             "3) Verify TPIN using verifyTpin.\n"
             "4) Verify card last 4 + expiry via verifyCardDetails.\n"
             "5) Activate card via activateCard.\n"
-            "6) Offer PIN generation via transferToIvrForPin when appropriate.\n"
-            "7) If verification repeatedly fails or user requests, transferToAgent."
+            "6) Offer ATM PIN generation via transferToIvrForPin.\n"
+            "7) After IVR transfer, ask if anything else is needed — do NOT ask for TPIN. The workflow is complete.\n"
+            "8) If verification repeatedly fails or user requests, transferToAgent."
         ),
     ),
     "balance_inquiry": WorkflowDefinition(

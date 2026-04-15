@@ -119,12 +119,13 @@ def convert_openai_tools_to_gemini_dict(openai_tools: List[Dict[str, Any]]) -> L
 @dataclass
 class GeminiResponse:
     """Represents a response from Gemini Live API."""
-    type: str  # 'audio', 'text', 'tool_call', 'setup_complete', 'turn_complete', 'interrupted'
+    type: str  # 'audio', 'text', 'tool_call', 'setup_complete', 'turn_complete', 'interrupted', 'usage_metadata'
     audio_data: Optional[bytes] = None
     text: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     transcription: Optional[str] = None
     is_final: bool = False
+    usage_metadata: Optional[Dict[str, Any]] = None
 
 
 class GeminiLiveClient:
@@ -200,10 +201,9 @@ class GeminiLiveClient:
         
         config["output_audio_transcription"] = {}
         config["input_audio_transcription"] = {}
-        
         config["context_window_compression"] = {
             "sliding_window": {
-                "target_tokens": 16384
+                "target_tokens": 8192
             }
         }
 
@@ -379,7 +379,25 @@ class GeminiLiveClient:
                                 type='tool_call_cancelled',
                                 tool_calls=[{"cancelled_ids": cancelled_ids}]
                             )
-                            
+
+                        # Handle usage metadata (real token counts from Gemini)
+                        if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                            usage = response.usage_metadata
+                            meta = {
+                                "total_token_count": getattr(usage, 'total_token_count', None),
+                            }
+                            details = getattr(usage, 'response_tokens_details', None)
+                            if details:
+                                meta["response_tokens_details"] = [
+                                    {"modality": str(d.modality), "token_count": d.token_count}
+                                    for d in details
+                                    if hasattr(d, 'modality') and hasattr(d, 'token_count')
+                                ]
+                            yield GeminiResponse(
+                                type='usage_metadata',
+                                usage_metadata=meta
+                            )
+
                     except Exception as parse_error:
                         print(f"⚠️ Error parsing Gemini response: {parse_error}")
                         # Continue processing other responses

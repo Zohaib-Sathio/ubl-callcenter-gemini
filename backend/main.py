@@ -89,7 +89,7 @@ class TokenTracker:
     AUDIO_INPUT_TOKENS_PER_SEC = 25      # 16 kHz, 16-bit mono
     AUDIO_OUTPUT_TOKENS_PER_SEC = 25     # 24 kHz, 16-bit mono
     CHARS_PER_TOKEN = 4
-    CONTEXT_WINDOW = 16384               # matches sliding_window target_tokens
+    CONTEXT_WINDOW = 8192                # matches sliding_window target_tokens
 
     def __init__(self, call_id: str, system_prompt: str, tools_json: list):
         self.call_id = call_id
@@ -900,7 +900,8 @@ async def media_stream_browser(websocket: WebSocket):
     call_id = None
     stream_sid = None
     gemini_client = None
-    
+    cleanup_done = False
+
     user_pcm_buffer = io.BytesIO()
     agent_pcm_buffer = io.BytesIO()
 
@@ -1169,7 +1170,16 @@ async def media_stream_browser(websocket: WebSocket):
                             _tool_call_received_at = None
                             _tool_response_sent_at = None
                             continue
-                    
+
+                        elif response.type == 'usage_metadata' and response.usage_metadata:
+                            meta = response.usage_metadata
+                            total = meta.get("total_token_count")
+                            details = meta.get("response_tokens_details", [])
+                            detail_str = ", ".join(
+                                f"{d['modality']}: {d['token_count']}" for d in details
+                            ) if details else ""
+                            print(f"🔢 [GEMINI TOKENS] call={call_id} total={total}{' | ' + detail_str if detail_str else ''}")
+
                     except Exception as inner_e:
                         print(f"⚠️ Error processing Gemini message: {inner_e}")
                         traceback.print_exc()
@@ -1219,43 +1229,47 @@ async def media_stream_browser(websocket: WebSocket):
         traceback.print_exc()
     
     finally:
+        if cleanup_done:
+            return
+        cleanup_done = True
+
         # Close Gemini connection
         if gemini_client:
             await gemini_client.close()
-        
+
         # Save recordings
         if call_id:
             print(f"💾 Saving recordings for call {call_id}...")
-            
+
             user_file_path = str(USER_AUDIO_DIR / f"{call_id}_user.wav")
             agent_file_path = str(AGENT_AUDIO_DIR / f"{call_id}_agent.wav")
-            
+
             def save_wav_file(path: str, pcm_data: bytes, sample_rate: int = 8000):
                 with wave.open(path, 'wb') as wf:
                     wf.setnchannels(1)
                     wf.setsampwidth(2)
                     wf.setframerate(sample_rate)
                     wf.writeframes(pcm_data)
-            
+
             # User audio at 16kHz (browser mic rate), agent at 24kHz (Gemini output rate)
             save_wav_file(user_file_path, user_pcm_buffer.getvalue(), sample_rate=16000)
             save_wav_file(agent_file_path, agent_pcm_buffer.getvalue(), sample_rate=24000)
-            
+
             print(f"✅ Saved user audio: {user_file_path}")
             print(f"✅ Saved agent audio: {agent_file_path}")
-            
+
             try:
                 user_transcript = await transcribe_audio(user_file_path)
             except Exception as e:
                 print(f"⚠️ Could not transcribe user audio: {e}")
                 user_transcript = ""
-            
+
             try:
                 agent_transcript = await transcribe_audio(agent_file_path)
             except Exception as e:
                 print(f"⚠️ Could not transcribe agent audio: {e}")
                 agent_transcript = ""
-            
+
             token_summary = token_tracker.get_summary() if token_tracker else {}
             if token_summary:
                 ts = token_summary
@@ -1281,13 +1295,13 @@ async def media_stream_browser(websocket: WebSocket):
             }
 
             print(f"📝 Transcripts saved for call {call_id}")
-            
+
             analysis_result = await analyze_call_with_llm(call_id, user_transcript, agent_transcript)
             print(f"📊 Call analysis complete: {analysis_result}")
-            
+
             with open(RECORDINGS_DIR / f"{call_id}_transcript.json", "w", encoding="utf-8") as f:
                 json.dump(transcripts_output, f, ensure_ascii=False, indent=2)
-        
+
         try:
             await websocket.close()
         except:

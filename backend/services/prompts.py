@@ -274,7 +274,7 @@ function_call_tools = [
     {
         "type": "function",
         "name": "updateCustomerTpin",
-        "description": "Update customer's TPIN after they set a new one through IVR. This should be called after IVR PIN generation is complete.",
+        "description": "Update customer's TPIN ONLY if the customer explicitly requests to change their TPIN. Do NOT call this after IVR PIN generation — IVR generates the card ATM PIN, not the TPIN. Only use when the customer specifically says they want to change/update their TPIN.",
         "parameters": {
             "type": "object",
             "properties": {

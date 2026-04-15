@@ -22,4 +22,4 @@ tzdata
 pinecone
 langchain-openai
 langchain-text-splitters
-google-genai
+google-genai>=1.73.0
