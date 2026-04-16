@@ -697,7 +697,13 @@
       micSource = micContext.createMediaStreamSource(stream);
 
       const workletCode = `class AudioProcessor extends AudioWorkletProcessor {
-        constructor() { super(); this.lastVoiceTime = currentTime; }
+        constructor() {
+          super();
+          this.lastVoiceTime = currentTime;
+          this.wasSpeaking = false;
+          this.PREROLL_CHUNKS = Math.ceil(0.5 * sampleRate / 128);
+          this.ringBuffer = [];
+        }
         process(inputs, outputs, parameters) {
           const input = inputs[0];
           if (!input || !input[0]) return true;
@@ -707,11 +713,23 @@
           const rms = Math.sqrt(sum / ch.length);
           const VOLUME_THRESHOLD = 0.08;
           const HANGOVER_MS = 0.5;
-          if (rms > VOLUME_THRESHOLD){
-          console.log("RMS:", rms);
-          this.lastVoiceTime = currentTime; }
-          const shouldSendAudio = rms > VOLUME_THRESHOLD || (currentTime - this.lastVoiceTime) < HANGOVER_MS;
-          this.port.postMessage({ audio: ch, sendAudio: shouldSendAudio });
+          if (rms > VOLUME_THRESHOLD) {
+            console.log("RMS:", rms);
+            this.lastVoiceTime = currentTime;
+          }
+          const isSpeaking = rms > VOLUME_THRESHOLD || (currentTime - this.lastVoiceTime) < HANGOVER_MS;
+          if (isSpeaking && !this.wasSpeaking) {
+            const preroll = this.ringBuffer;
+            this.ringBuffer = [];
+            this.port.postMessage({ audio: ch, sendAudio: true, preroll: preroll });
+          } else if (isSpeaking) {
+            this.port.postMessage({ audio: ch, sendAudio: true });
+          } else {
+            this.ringBuffer.push(new Float32Array(ch));
+            if (this.ringBuffer.length > this.PREROLL_CHUNKS) this.ringBuffer.shift();
+            this.port.postMessage({ audio: ch, sendAudio: false });
+          }
+          this.wasSpeaking = isSpeaking;
           return true;
         }
       }
@@ -725,7 +743,14 @@
       let lastSpeechLogTime = 0;
       const SPEECH_LOG_INTERVAL_MS = 2000;
       micProc.port.onmessage = (e) => {
-        const { audio, sendAudio } = e.data;
+        const { audio, sendAudio, preroll } = e.data;
+        if (preroll && preroll.length > 0) {
+          for (const chunk of preroll) {
+            const pcm16 = floatTo16BitPCM(chunk);
+            const b64 = uint8ToBase64(pcm16);
+            if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ event: "media", media: { payload: b64, timestamp: Date.now() } }));
+          }
+        }
         if (sendAudio) {
           const now = Date.now();
           if (now - lastSpeechLogTime > SPEECH_LOG_INTERVAL_MS) {
@@ -734,10 +759,6 @@
           }
           const pcm16 = floatTo16BitPCM(audio);
           const b64 = uint8ToBase64(pcm16);
-          if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ event: "media", media: { payload: b64, timestamp: Date.now() } }));
-        } else {
-          const silence = new Uint8Array(audio.length * 2);
-          const b64 = uint8ToBase64(silence);
           if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ event: "media", media: { payload: b64, timestamp: Date.now() } }));
         }
       };
