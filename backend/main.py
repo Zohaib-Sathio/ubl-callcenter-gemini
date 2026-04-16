@@ -1072,7 +1072,6 @@ async def media_stream_browser(websocket: WebSocket):
                                 # suppress ALL post-tool audio to avoid duplicate speech
                                 if _audio_sent_before_tool:
                                     _suppress_post_tool_audio = True
-                                    await websocket.send_json({"event": "clear"})
                                     print(f"🔇 Suppressing post-tool audio — already spoke before tool call")
 
                             pcm_24khz = response.audio_data
