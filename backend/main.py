@@ -632,10 +632,16 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                 message = (
                     f"Workflow selected: {workflow_id}. "
                     f"Phases {skipped_list} were already completed — start directly from phase '{effective_phase}'. "
-                    f"Do NOT re-ask the customer for any previously verified information."
+                    f"Do NOT re-ask the customer for any previously verified information. "
+                    f"IMPORTANT: You already spoke to the customer before this tool call. "
+                    f"Do NOT repeat what you just said. Continue naturally from where you left off."
                 )
             else:
-                message = f"Workflow selected: {workflow_id}"
+                message = (
+                    f"Workflow selected: {workflow_id}. "
+                    f"IMPORTANT: You already spoke to the customer before this tool call. "
+                    f"Do NOT repeat what you just said. Continue naturally from where you left off."
+                )
 
             return {
                 "success": True,
@@ -912,6 +918,9 @@ async def media_stream_browser(websocket: WebSocket):
     _tool_func_name = None
     _tool_response_sent_at = None
     _first_audio_after_tool = True
+    _audio_sent_before_tool = False  # True if audio was already forwarded before a tool call in this turn
+    _suppress_post_tool_audio = False  # True = drop all post-tool audio until turn_complete
+    _turn_audio_bytes = 0  # Track audio bytes sent to browser in current turn
 
     token_tracker: TokenTracker | None = None
     
@@ -1045,7 +1054,7 @@ async def media_stream_browser(websocket: WebSocket):
         async def receive_from_gemini_and_forward():
             """Receive responses from Gemini and forward to browser."""
             nonlocal function_call_completed_time
-            nonlocal _tool_call_received_at, _tool_func_name, _tool_response_sent_at, _first_audio_after_tool
+            nonlocal _tool_call_received_at, _tool_func_name, _tool_response_sent_at, _first_audio_after_tool, _audio_sent_before_tool, _suppress_post_tool_audio, _turn_audio_bytes
             
             try:
                 async for response in gemini_client.receive():
@@ -1059,13 +1068,28 @@ async def media_stream_browser(websocket: WebSocket):
                                 first_audio_delay = (time.time() - _tool_response_sent_at) * 1000
                                 total_delay = (time.time() - _tool_call_received_at) * 1000
                                 print(f"⏱️ [GEMINI TIMING] {_tool_func_name} | first_audio_after_tool_response: {first_audio_delay:.0f}ms | total_tool_to_audio: {total_delay:.0f}ms")
-                            
+                                # If audio was already sent before the tool call,
+                                # suppress ALL post-tool audio to avoid duplicate speech
+                                if _audio_sent_before_tool:
+                                    _suppress_post_tool_audio = True
+                                    await websocket.send_json({"event": "clear"})
+                                    print(f"🔇 Suppressing post-tool audio — already spoke before tool call")
+
                             pcm_24khz = response.audio_data
                             agent_pcm_buffer.write(pcm_24khz)
 
                             if token_tracker:
                                 token_tracker.add_output_audio(len(pcm_24khz))
 
+                            # Track that audio was sent in this turn (before any tool call)
+                            if not _tool_call_received_at:
+                                _audio_sent_before_tool = True
+
+                            # Drop audio chunks when suppressing post-tool duplicates
+                            if _suppress_post_tool_audio:
+                                continue
+
+                            _turn_audio_bytes += len(pcm_24khz)
                             pcm_b64 = base64.b64encode(pcm_24khz).decode('utf-8')
                             out = {
                                 "event": "media",
@@ -1151,6 +1175,18 @@ async def media_stream_browser(websocket: WebSocket):
                             if function_call_completed_time is not None:
                                 print(f"✅ Response completed, clearing function call flag")
                                 function_call_completed_time = None
+
+                            # Detect empty/silent turns and nudge Gemini to retry
+                            if _turn_audio_bytes == 0 and not _suppress_post_tool_audio:
+                                print(f"⚠️ Empty audio turn detected — nudging Gemini to respond")
+                                await gemini_client.send_text(
+                                    "You did not produce any audio response. "
+                                    "The customer is waiting. Please respond now based on the conversation so far."
+                                )
+
+                            _audio_sent_before_tool = False
+                            _suppress_post_tool_audio = False
+                            _turn_audio_bytes = 0
 
                             if token_tracker:
                                 token_tracker.finalize_turn()

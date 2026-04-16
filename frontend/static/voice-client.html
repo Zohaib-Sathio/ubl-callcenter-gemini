@@ -760,6 +760,10 @@
           const pcm16 = floatTo16BitPCM(audio);
           const b64 = uint8ToBase64(pcm16);
           if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ event: "media", media: { payload: b64, timestamp: Date.now() } }));
+        } else {
+          const silence = new Uint8Array(audio.length * 2);
+          const b64 = uint8ToBase64(silence);
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ event: "media", media: { payload: b64, timestamp: Date.now() } }));
         }
       };
       micSource.connect(micProc);
