@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   ubldigital-callcenter:
     build:
@@ -7,7 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: ubl-callcenter-gemini
     ports:
-      - "7016:7016"
+      - "7019:7019"
     env_file:
       - .env
     environment:
@@ -17,7 +15,7 @@ services:
       - ./pages:/app/pages
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:7016/" ]
+      test: [ "CMD", "curl", "-f", "http://localhost:7019/" ]
       interval: 30s
       timeout: 10s
       retries: 3
