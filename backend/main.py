@@ -1084,21 +1084,14 @@ async def media_stream_browser(websocket: WebSocket):
                             # Send to Gemini immediately
                             await gemini_client.send_audio(pcm_16khz)
 
-                            # --- Primary speaker verification ---
-                            # Run OUTSIDE the broad except below so any failure
-                            # is visible rather than swallowed per-chunk.
+                            # Append to speaker-verification buffer (cheap — just
+                            # a numpy concat). The actual embedding + comparison
+                            # runs in the separate speaker_monitor task so it
+                            # never blocks audio forwarding to Gemini.
                             try:
                                 speaker_verifier.add_audio(pcm_data)
-                                check = await speaker_verifier.maybe_check()
                             except Exception as sv_err:
-                                print(f"❌ [SECURITY] Verifier error for call {call_id}: {sv_err}")
-                                traceback.print_exc()
-                                check = None
-                            if check is not None and check.mismatch_confirmed:
-                                await _handle_speaker_mismatch(
-                                    websocket, gemini_client, call_id, check
-                                )
-                                return
+                                print(f"❌ [SECURITY] add_audio error: {sv_err}")
                         
                         elif data.get("event") == "stop":
                             print(f"🛑 Browser sent stop event for call {call_id}")
@@ -1304,22 +1297,45 @@ async def media_stream_browser(websocket: WebSocket):
                 except:
                     pass
         
-        # Run both tasks concurrently
+        async def speaker_monitor():
+            """Periodically run speaker verification off the audio hot path.
+            Exits (and thereby triggers call cleanup) when a mismatch is
+            confirmed."""
+            while True:
+                await asyncio.sleep(0.5)
+                if speaker_verifier is None:
+                    continue
+                try:
+                    result = await speaker_verifier.maybe_check()
+                except Exception as e:
+                    print(f"❌ [SECURITY] speaker_monitor error: {e}")
+                    traceback.print_exc()
+                    continue
+                if result is not None and result.mismatch_confirmed:
+                    await _handle_speaker_mismatch(
+                        websocket, gemini_client, call_id, result
+                    )
+                    return
+
+        # Run tasks concurrently
         recv_task = asyncio.create_task(receive_from_browser())
         send_task = asyncio.create_task(receive_from_gemini_and_forward())
-        
+        monitor_task = asyncio.create_task(speaker_monitor())
+
         try:
             done, pending = await asyncio.wait(
-                [recv_task, send_task],
+                [recv_task, send_task, monitor_task],
                 return_when=asyncio.FIRST_COMPLETED
             )
-            
+
             for task in done:
                 if task == recv_task:
                     print(f"🔚 Browser receive task completed for call {call_id}")
                 elif task == send_task:
                     print(f"🔚 Gemini send task completed for call {call_id}")
-                
+                elif task == monitor_task:
+                    print(f"🔚 Speaker monitor task completed for call {call_id}")
+
                 if task.exception():
                     print(f"❌ Task exception: {task.exception()}")
             
