@@ -53,6 +53,11 @@ from backend.workflow.registry import (
 )
 from backend.services.rag_tools import search_knowledge_base, prewarm_embeddings
 from backend.services.audio_transcription import transcribe_audio, analyze_call_with_llm
+from backend.services.speaker_verification import (
+    SpeakerVerifier,
+    SpeakerCheckResult,
+    warm_encoder as warm_speaker_encoder,
+)
 from backend.services.gemini_live import (
     GeminiLiveClient,
     GeminiLiveConfig,
@@ -274,6 +279,7 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_prewarm():
     asyncio.create_task(prewarm_embeddings())
+    asyncio.create_task(warm_speaker_encoder())
 
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "ubl-digital-ai-call-center-secret-key-2024")
@@ -307,6 +313,51 @@ RATE = 8000
 call_metadata: dict[str, dict] = {}
 
 
+async def _handle_speaker_mismatch(
+    websocket: WebSocket,
+    gemini_client,
+    call_id: str | None,
+    result: SpeakerCheckResult,
+) -> None:
+    """Flag the call, notify the frontend, and close the WebSocket with
+    code 4001 when the primary speaker has changed mid-call."""
+    similarity = result.similarity
+    print(
+        f"🚨 [SECURITY] Primary speaker change detected for call {call_id} "
+        f"(similarity={similarity:.3f})"
+    )
+    if call_id:
+        call_metadata.setdefault(call_id, {})
+        call_metadata[call_id]["speaker_mismatch_detected"] = True
+        call_metadata[call_id]["speaker_similarity_at_mismatch"] = similarity
+    _record_routing_event(
+        call_id,
+        "speaker_changed",
+        {"similarity": similarity, "threshold_breached": True},
+    )
+
+    try:
+        await websocket.send_json({
+            "event": "speaker_changed",
+            "message": "Primary speaker change detected. Ending call.",
+            "similarity": similarity,
+            "severity": "critical",
+        })
+    except Exception as e:
+        print(f"⚠️ Failed to send speaker_changed event: {e}")
+
+    if gemini_client is not None:
+        try:
+            await gemini_client.close()
+        except Exception as e:
+            print(f"⚠️ Failed to close Gemini session cleanly: {e}")
+
+    try:
+        await websocket.close(code=4001, reason="speaker_changed")
+    except Exception:
+        pass
+
+
 def _record_routing_event(call_id: str | None, event_type: str, payload: dict | None = None) -> None:
     if not call_id:
         return
@@ -336,6 +387,8 @@ def _init_conversation_state(call_id: str) -> None:
         "card_details_verified": False,
         "card_activated": False,
     })
+    call_metadata[call_id].setdefault("speaker_mismatch_detected", False)
+    call_metadata[call_id].setdefault("speaker_similarity_at_mismatch", None)
 
 
 def _log_conversation_state(call_id: str, operation: str) -> None:
@@ -911,6 +964,8 @@ async def media_stream_browser(websocket: WebSocket):
     user_pcm_buffer = io.BytesIO()
     agent_pcm_buffer = io.BytesIO()
 
+    speaker_verifier: SpeakerVerifier | None = None
+
     function_call_completed_time = None
     FUNCTION_CALL_GRACE_PERIOD = 3.0
 
@@ -951,6 +1006,8 @@ async def media_stream_browser(websocket: WebSocket):
         
         call_id = start_data["start"]["customParameters"].get("call_id")
         stream_sid = start_data["start"].get("streamSid", "browser-stream")
+        speaker_verifier = SpeakerVerifier(call_id=call_id)
+        print(f"🔒 [SECURITY] SpeakerVerifier initialized for call {call_id}")
         meta = call_metadata.get(call_id, {})
         
         # Build Gemini configuration
@@ -1026,6 +1083,22 @@ async def media_stream_browser(websocket: WebSocket):
 
                             # Send to Gemini immediately
                             await gemini_client.send_audio(pcm_16khz)
+
+                            # --- Primary speaker verification ---
+                            # Run OUTSIDE the broad except below so any failure
+                            # is visible rather than swallowed per-chunk.
+                            try:
+                                speaker_verifier.add_audio(pcm_data)
+                                check = await speaker_verifier.maybe_check()
+                            except Exception as sv_err:
+                                print(f"❌ [SECURITY] Verifier error for call {call_id}: {sv_err}")
+                                traceback.print_exc()
+                                check = None
+                            if check is not None and check.mismatch_confirmed:
+                                await _handle_speaker_mismatch(
+                                    websocket, gemini_client, call_id, check
+                                )
+                                return
                         
                         elif data.get("event") == "stop":
                             print(f"🛑 Browser sent stop event for call {call_id}")
@@ -1318,15 +1391,19 @@ async def media_stream_browser(websocket: WebSocket):
                     f"({ts['utilization_pct']}% utilization)"
                 )
 
+            call_meta_snapshot = call_metadata.get(call_id, {})
             transcripts_output = {
                 "call_id": call_id,
                 "user_transcript": user_transcript,
                 "agent_transcript": agent_transcript,
-                "conversation_summary": call_metadata.get(call_id, {}).get("conversation_summary", ""),
-                "topics_discussed": call_metadata.get(call_id, {}).get("conversation_memory", []),
-                "pending_questions": call_metadata.get(call_id, {}).get("question_queue", []),
-                "answered_questions": call_metadata.get(call_id, {}).get("answered_questions", []),
+                "conversation_summary": call_meta_snapshot.get("conversation_summary", ""),
+                "topics_discussed": call_meta_snapshot.get("conversation_memory", []),
+                "pending_questions": call_meta_snapshot.get("question_queue", []),
+                "answered_questions": call_meta_snapshot.get("answered_questions", []),
                 "token_usage": token_summary,
+                "speaker_mismatch_detected": call_meta_snapshot.get("speaker_mismatch_detected", False),
+                "speaker_similarity_at_mismatch": call_meta_snapshot.get("speaker_similarity_at_mismatch"),
+                "routing_events": call_meta_snapshot.get("routing_events", []),
             }
 
             print(f"📝 Transcripts saved for call {call_id}")

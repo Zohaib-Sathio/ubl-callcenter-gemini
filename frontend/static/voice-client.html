@@ -234,6 +234,12 @@
               </button>
             </div>
 
+            <div id="securityAlert"
+              class="hidden mb-3 p-3 rounded-lg bg-red-100 border-2 border-red-500 text-red-800 text-sm font-semibold">
+              <span class="mr-1">⚠️</span>
+              <span id="securityAlertMessage">Security alert: primary speaker changed. Call terminated.</span>
+            </div>
+
             <div id="statusContainer" class="hidden flex-col items-center gap-2 mb-4">
               <div
                 class="inline-flex items-center gap-2 bg-gradient-to-r from-green-100 to-green-50 border-2 border-green-500 rounded-full px-4 py-2">
@@ -639,6 +645,10 @@
       lowPassFilter.connect(audioContext.destination);
       lastScheduledTime = audioContext.currentTime;
 
+      const securityAlertEl = document.getElementById("securityAlert");
+      const securityAlertMsgEl = document.getElementById("securityAlertMessage");
+      if (securityAlertEl) securityAlertEl.classList.add("hidden");
+
       ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/media-stream-browser");
 
       ws.addEventListener("open", () => {
@@ -652,6 +662,16 @@
         try {
           const data = JSON.parse(ev.data);
           if (data.event === "clear") { clearAudioQueue(); log("🔇 Audio queue cleared"); }
+          else if (data.event === "speaker_changed") {
+            const sim = typeof data.similarity === "number" ? ` (similarity ${data.similarity.toFixed(2)})` : "";
+            if (securityAlertMsgEl) {
+              securityAlertMsgEl.textContent = (data.message || "Primary speaker change detected. Call terminated.") + sim;
+            }
+            if (securityAlertEl) securityAlertEl.classList.remove("hidden");
+            log("🚨 Security: primary speaker changed — terminating call");
+            stopCallTimer();
+            try { ws.close(1000, "speaker_changed"); } catch (_) {}
+          }
           else if (data.event === "token_usage") {
             callSessionTokenUsage = data.session_total || data.usage || callSessionTokenUsage;
           }
@@ -680,8 +700,15 @@
         } catch (e) { console.error("WebSocket message error", e); }
       });
 
-      ws.addEventListener("close", () => {
+      ws.addEventListener("close", (ev) => {
         log("WebSocket closed");
+        if (ev && ev.code === 4001) {
+          if (securityAlertMsgEl) {
+            securityAlertMsgEl.textContent = "Security alert: primary speaker changed. Call terminated.";
+          }
+          if (securityAlertEl) securityAlertEl.classList.remove("hidden");
+          log("🚨 Security: call terminated by server (speaker changed)");
+        }
         logTokenUsageSummary();
         statusContainer.classList.add("hidden");
         statusContainer.classList.remove("flex");

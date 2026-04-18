@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     ffmpeg \
     libsndfile1 \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

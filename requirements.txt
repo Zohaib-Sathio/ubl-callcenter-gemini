@@ -23,3 +23,5 @@ pinecone
 langchain-openai
 langchain-text-splitters
 google-genai>=1.73.0
+resemblyzer
+numpy
