@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: ubl-callcenter-gemini
+    container_name: dev-ubl-callcenter-gemini
     ports:
       - "7019:7019"
     env_file:
