@@ -326,7 +326,7 @@ SPEAKER_HANDOFF_TRIGGER_TEXT = (
     f"Do not translate. Do not add anything else. Sentence: \"{FAREWELL_MESSAGE}\""
 )
 FAREWELL_MAX_WAIT_SECONDS = 15.0
-FAREWELL_TAIL_SECONDS = 1.5  # let any in-flight audio chunks finish playing
+FAREWELL_TAIL_SECONDS = 3.0  # let any in-flight audio chunks finish playing on the browser
 FAREWELL_GRACE_SECONDS = 1.5  # ignore turn_complete fired this soon after directive
 FAREWELL_MIN_AUDIO_BYTES = 40000  # ~0.83s @ 24kHz mono 16-bit; reject stale turn_complete
 
@@ -1305,8 +1305,15 @@ async def media_stream_browser(websocket: WebSocket):
                                             f"{SPEAKER_HANDOFF_TOOL_NAME}: {ack_err}"
                                         )
                                     if farewell_state["active"]:
+                                        # Record ack, but do NOT signal the
+                                        # handler here — Gemini often emits
+                                        # the tool call before the final
+                                        # audio frames of the same turn have
+                                        # been sent. Wait for turn_complete
+                                        # (filtered) so tail audio is
+                                        # forwarded to the browser before we
+                                        # close the socket.
                                         farewell_state["tool_ack"] = True
-                                        farewell_state["event"].set()
                                     continue
 
                                 _tool_call_received_at = time.time()
