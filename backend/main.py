@@ -325,10 +325,74 @@ SPEAKER_HANDOFF_TRIGGER_TEXT = (
     "with reason=\"second_speaker_detected\". Do not call any other tool. "
     f"Do not translate. Do not add anything else. Sentence: \"{FAREWELL_MESSAGE}\""
 )
-FAREWELL_MAX_WAIT_SECONDS = 15.0
-FAREWELL_TAIL_SECONDS = 3.0  # let any in-flight audio chunks finish playing on the browser
+FAREWELL_MAX_WAIT_SECONDS = 8.0
+FAREWELL_TAIL_SECONDS = 1.5  # let any in-flight audio chunks finish playing on the browser
 FAREWELL_GRACE_SECONDS = 1.5  # ignore turn_complete fired this soon after directive
-FAREWELL_MIN_AUDIO_BYTES = 40000  # ~0.83s @ 24kHz mono 16-bit; reject stale turn_complete
+FAREWELL_MIN_AUDIO_BYTES = 40000  # ~0.83s @ 24kHz mono 16-bit; below this = Gemini skipped speaking
+FAREWELL_FALLBACK_CHUNK_BYTES = 4800  # 100ms @ 24kHz mono 16-bit
+
+_FAREWELL_FALLBACK_PCM: bytes | None = None
+_FAREWELL_FALLBACK_LOCK = asyncio.Lock()
+
+
+async def _get_fallback_farewell_audio() -> bytes | None:
+    """Return cached 24kHz mono 16-bit PCM of the farewell message.
+    Generated on first use via OpenAI TTS so we always have something to play
+    if Gemini skips speaking the security handoff sentence."""
+    global _FAREWELL_FALLBACK_PCM
+    if _FAREWELL_FALLBACK_PCM is not None:
+        return _FAREWELL_FALLBACK_PCM
+    async with _FAREWELL_FALLBACK_LOCK:
+        if _FAREWELL_FALLBACK_PCM is not None:
+            return _FAREWELL_FALLBACK_PCM
+        try:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI()
+            resp = await client.audio.speech.create(
+                model="tts-1",
+                voice="onyx",
+                input=FAREWELL_MESSAGE,
+                response_format="pcm",
+            )
+            pcm = resp.content if hasattr(resp, "content") else await resp.aread()
+            _FAREWELL_FALLBACK_PCM = pcm
+            print(f"🔊 [SECURITY] Cached fallback farewell audio ({len(pcm)} bytes)")
+            return _FAREWELL_FALLBACK_PCM
+        except Exception as e:
+            print(f"⚠️ [SECURITY] Failed to synthesize fallback farewell: {e}")
+            return None
+
+
+async def _stream_fallback_farewell(websocket: WebSocket) -> bool:
+    """Play the pre-rendered farewell clip to the browser as 'media' events.
+    Returns True if any audio was streamed."""
+    pcm = await _get_fallback_farewell_audio()
+    if not pcm:
+        return False
+    streamed_bytes = 0
+    for i in range(0, len(pcm), FAREWELL_FALLBACK_CHUNK_BYTES):
+        chunk = pcm[i:i + FAREWELL_FALLBACK_CHUNK_BYTES]
+        try:
+            await websocket.send_json({
+                "event": "media",
+                "media": {
+                    "payload": base64.b64encode(chunk).decode("utf-8"),
+                    "format": "raw_pcm",
+                    "sampleRate": 24000,
+                    "channels": 1,
+                    "bitDepth": 16,
+                },
+            })
+            streamed_bytes += len(chunk)
+        except Exception as e:
+            print(f"⚠️ [SECURITY] Fallback stream interrupted: {e}")
+            break
+    if streamed_bytes == 0:
+        return False
+    # Let the browser finish playback before the socket closes.
+    duration_s = streamed_bytes / (24000 * 2)
+    await asyncio.sleep(duration_s + 0.5)
+    return True
 
 
 async def _handle_speaker_mismatch(
@@ -387,21 +451,26 @@ async def _handle_speaker_mismatch(
                 # arrived. Let in-flight audio chunks finish playing before
                 # yanking the socket.
                 await asyncio.sleep(FAREWELL_TAIL_SECONDS)
-                farewell_delivered = farewell_state["audio_bytes"] > 0
+                farewell_delivered = (
+                    farewell_state["audio_bytes"] >= FAREWELL_MIN_AUDIO_BYTES
+                )
                 print(
                     f"⏱️ [SECURITY TIMING] call={call_id} "
                     f"farewell_total_ms={(time.time() - farewell_start) * 1000.0:.0f} "
                     f"audio_bytes={farewell_state['audio_bytes']} "
-                    f"tool_ack={farewell_state['tool_ack']}"
+                    f"tool_ack={farewell_state['tool_ack']} "
+                    f"delivered={farewell_delivered}"
                 )
             except asyncio.TimeoutError:
                 print(
                     f"⚠️ [SECURITY] Farewell event timed out after "
                     f"{FAREWELL_MAX_WAIT_SECONDS}s "
                     f"(audio_bytes={farewell_state['audio_bytes']}, "
-                    f"tool_ack={farewell_state['tool_ack']}) — closing anyway"
+                    f"tool_ack={farewell_state['tool_ack']}) — falling back"
                 )
-                farewell_delivered = farewell_state["audio_bytes"] > 0
+                farewell_delivered = (
+                    farewell_state["audio_bytes"] >= FAREWELL_MIN_AUDIO_BYTES
+                )
         except Exception as e:
             print(f"⚠️ [SECURITY] Failed to drive Gemini farewell: {e}")
             traceback.print_exc()
@@ -409,15 +478,23 @@ async def _handle_speaker_mismatch(
             farewell_state["active"] = False
 
     if not farewell_delivered:
-        # Audible path failed — at minimum surface the message as a text event
-        # so the UI can render it before the socket dies.
-        try:
-            await websocket.send_json({
-                "event": "agent_message",
-                "text": FAREWELL_MESSAGE,
-            })
-        except Exception:
-            pass
+        # Gemini didn't speak the handoff sentence (or produced too little
+        # audio). Play the pre-synthesized fallback so the customer always
+        # hears the reason the call is ending.
+        print(f"🔊 [SECURITY] Streaming fallback farewell audio for call {call_id}")
+        fallback_ok = await _stream_fallback_farewell(websocket)
+        if fallback_ok:
+            farewell_delivered = True
+        else:
+            # Last resort — surface a text event; frontend's security alert
+            # is already visible so this is purely diagnostic.
+            try:
+                await websocket.send_json({
+                    "event": "agent_message",
+                    "text": FAREWELL_MESSAGE,
+                })
+            except Exception:
+                pass
 
     # Close order matters: the browser WebSocket 4001 frame is the
     # user-facing signal the frontend keys off of, and must land before
@@ -1385,7 +1462,20 @@ async def media_stream_browser(websocket: WebSocket):
                                     farewell_state["audio_bytes"]
                                     - farewell_state["audio_bytes_at_directive"]
                                 )
-                                if (
+                                if farewell_state["tool_ack"]:
+                                    # endCallSpeakerChange was invoked on this
+                                    # turn — this turn_complete is definitively
+                                    # the end of the farewell turn. Signal now
+                                    # regardless of audio so the handler can
+                                    # run the TTS fallback if Gemini stayed
+                                    # silent.
+                                    print(
+                                        f"🛑 [SECURITY] turn_complete after tool ack "
+                                        f"— signalling (elapsed={elapsed:.2f}s, "
+                                        f"post_directive_audio={post_directive_audio})"
+                                    )
+                                    farewell_state["event"].set()
+                                elif (
                                     elapsed >= FAREWELL_GRACE_SECONDS
                                     and post_directive_audio >= FAREWELL_MIN_AUDIO_BYTES
                                 ):
