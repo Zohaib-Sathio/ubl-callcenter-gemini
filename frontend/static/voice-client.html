@@ -665,12 +665,12 @@
           else if (data.event === "speaker_changed") {
             const sim = typeof data.similarity === "number" ? ` (similarity ${data.similarity.toFixed(2)})` : "";
             if (securityAlertMsgEl) {
-              securityAlertMsgEl.textContent = (data.message || "Primary speaker change detected. Call terminated.") + sim;
+              securityAlertMsgEl.textContent = (data.message || "Primary speaker change detected. Handing off to human agent.") + sim;
             }
             if (securityAlertEl) securityAlertEl.classList.remove("hidden");
-            log("🚨 Security: primary speaker changed — terminating call");
-            stopCallTimer();
-            try { ws.close(1000, "speaker_changed"); } catch (_) {}
+            log("🚨 Security: primary speaker changed — playing handoff message before close");
+            // Do NOT close the socket here — the backend needs to stream the
+            // farewell audio first and will close when playback is done.
           }
           else if (data.event === "token_usage") {
             callSessionTokenUsage = data.session_total || data.usage || callSessionTokenUsage;
