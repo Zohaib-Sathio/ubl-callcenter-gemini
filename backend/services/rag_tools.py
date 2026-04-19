@@ -1,17 +1,23 @@
 import os
 import time
 import asyncio
+import chromadb
 from openai import AsyncOpenAI
-from pinecone import Pinecone
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "jsbank-callcenter")
-PINECONE_NAMESPACE = os.getenv("PINECONE_NAMESPACE", "ubldigital-data")
+CHROMA_PATH = os.getenv(
+    "CHROMA_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "chroma"),
+)
+COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "ubldigital-data")
 
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index(PINECONE_INDEX_NAME)
+_chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
+collection = _chroma_client.get_or_create_collection(
+    name=COLLECTION_NAME,
+    metadata={"hnsw:space": "cosine"},
+)
 
 _openai_async = AsyncOpenAI()
 _EMBED_MODEL = "text-embedding-3-small"
@@ -65,13 +71,28 @@ def _sync_embed(query: str) -> list[float]:
     return vector
 
 
-def _pinecone_query(vector: list[float], top_k: int):
-    return index.query(
-        vector=vector,
-        top_k=top_k,
-        include_metadata=True,
-        namespace=PINECONE_NAMESPACE
+def _chroma_query(vector: list[float], top_k: int):
+    res = collection.query(
+        query_embeddings=[vector],
+        n_results=top_k,
+        include=["metadatas", "documents", "distances"],
     )
+    ids = (res.get("ids") or [[]])[0]
+    metadatas = (res.get("metadatas") or [[]])[0]
+    documents = (res.get("documents") or [[]])[0]
+    distances = (res.get("distances") or [[]])[0]
+
+    matches = []
+    for i in range(len(ids)):
+        dist = distances[i] if i < len(distances) else 1.0
+        score = 1.0 - float(dist)
+        md = metadatas[i] if i < len(metadatas) else {}
+        if md is None:
+            md = {}
+        if documents and i < len(documents) and documents[i] and not md.get("text"):
+            md = {**md, "text": documents[i]}
+        matches.append({"id": ids[i], "score": score, "metadata": md})
+    return matches
 
 
 async def prewarm_embeddings():
@@ -89,9 +110,9 @@ async def prewarm_embeddings():
 def retrieve_context(query: str, top_k: int = 3, min_score: float = 0.35) -> str:
     try:
         query_vector = _sync_embed(query)
-        results = _pinecone_query(query_vector, top_k)
+        matches = _chroma_query(query_vector, top_k)
 
-        relevant_matches = [m for m in results.matches if m.score >= min_score]
+        relevant_matches = [m for m in matches if m["score"] >= min_score]
         if not relevant_matches:
             return ""
 
@@ -99,7 +120,7 @@ def retrieve_context(query: str, top_k: int = 3, min_score: float = 0.35) -> str
         seen_content = set()
 
         for match in relevant_matches:
-            metadata = match.metadata or {}
+            metadata = match["metadata"] or {}
             text_content = metadata.get("text", "")
             category = metadata.get("category", "General")
             subcategory = metadata.get("subcategory", "")
@@ -129,17 +150,17 @@ async def search_knowledge_base(query: str, top_k: int = 3, min_score: float = 0
         vector = await _async_embed(query)
         embed_ms = (time.time() - start_time) * 1000
 
-        results = await asyncio.to_thread(_pinecone_query, vector, top_k)
+        matches = await asyncio.to_thread(_chroma_query, vector, top_k)
         elapsed = time.time() - start_time
         print(f"🔍 RAG SEARCH completed in {elapsed:.2f}s (embed: {embed_ms:.0f}ms)")
 
-        if not results.matches:
+        if not matches:
             return {"context": ""}
 
-        relevant_matches = [m for m in results.matches if m.score >= min_score]
+        relevant_matches = [m for m in matches if m["score"] >= min_score]
 
         if not relevant_matches:
-            print(f"⚠️ RAG: All {len(results.matches)} results below threshold ({min_score})")
+            print(f"⚠️ RAG: All {len(matches)} results below threshold ({min_score})")
             return {"context": ""}
 
         context_chunks = []
@@ -150,7 +171,7 @@ async def search_knowledge_base(query: str, top_k: int = 3, min_score: float = 0
         for match in relevant_matches:
             if total_chars >= MAX_TOTAL_CHARS:
                 break
-            metadata = match.metadata or {}
+            metadata = match["metadata"] or {}
             text_content = metadata.get("text", "")
 
             content_hash = hash(text_content[:100])

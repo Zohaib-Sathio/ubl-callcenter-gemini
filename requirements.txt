@@ -19,7 +19,7 @@ attrs
 openai
 PyJWT
 tzdata
-pinecone
+chromadb
 langchain-openai
 langchain-text-splitters
 google-genai>=1.73.0
