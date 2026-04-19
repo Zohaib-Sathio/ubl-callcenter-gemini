@@ -379,6 +379,9 @@ async def _handle_speaker_mismatch(
                     farewell_state["event"].wait(),
                     timeout=FAREWELL_MAX_WAIT_SECONDS,
                 )
+                # Event fired — either the tool was called or turn_complete
+                # arrived. Let in-flight audio chunks finish playing before
+                # yanking the socket.
                 await asyncio.sleep(FAREWELL_TAIL_SECONDS)
                 farewell_delivered = farewell_state["audio_bytes"] > 0
                 print(
@@ -389,10 +392,10 @@ async def _handle_speaker_mismatch(
                 )
             except asyncio.TimeoutError:
                 print(
-                    f"⚠️ [SECURITY] Farewell timed out after "
+                    f"⚠️ [SECURITY] Farewell event timed out after "
                     f"{FAREWELL_MAX_WAIT_SECONDS}s "
                     f"(audio_bytes={farewell_state['audio_bytes']}, "
-                    f"tool_ack={farewell_state['tool_ack']})"
+                    f"tool_ack={farewell_state['tool_ack']}) — closing anyway"
                 )
                 farewell_delivered = farewell_state["audio_bytes"] > 0
         except Exception as e:
@@ -401,8 +404,11 @@ async def _handle_speaker_mismatch(
         finally:
             farewell_state["active"] = False
 
+        print(f"🛑 [SECURITY] Closing Gemini session for call {call_id}")
         try:
-            await gemini_client.close()
+            await asyncio.wait_for(gemini_client.close(), timeout=3.0)
+        except asyncio.TimeoutError:
+            print("⚠️ [SECURITY] Gemini close timed out — continuing")
         except Exception as e:
             print(f"⚠️ Failed to close Gemini session cleanly: {e}")
 
@@ -417,10 +423,17 @@ async def _handle_speaker_mismatch(
         except Exception:
             pass
 
+    print(f"🛑 [SECURITY] Closing browser WebSocket (code=4001) for call {call_id}")
     try:
-        await websocket.close(code=4001, reason="speaker_changed")
-    except Exception:
-        pass
+        await asyncio.wait_for(
+            websocket.close(code=4001, reason="speaker_changed"),
+            timeout=3.0,
+        )
+        print(f"✅ [SECURITY] Browser WebSocket closed for call {call_id}")
+    except asyncio.TimeoutError:
+        print(f"⚠️ [SECURITY] websocket.close() hung — forcing")
+    except Exception as e:
+        print(f"⚠️ [SECURITY] websocket.close error: {e}")
 
 
 def _record_routing_event(call_id: str | None, event_type: str, payload: dict | None = None) -> None:
@@ -1340,6 +1353,12 @@ async def media_stream_browser(websocket: WebSocket):
                                 _tool_response_sent_at = None
                             print(f"📋 Gemini turn complete")
                             if farewell_state["active"]:
+                                print(
+                                    f"🛑 [SECURITY] turn_complete during farewell "
+                                    f"— signalling handler (audio_bytes="
+                                    f"{farewell_state['audio_bytes']}, "
+                                    f"tool_ack={farewell_state['tool_ack']})"
+                                )
                                 farewell_state["event"].set()
                             if function_call_completed_time is not None:
                                 print(f"✅ Response completed, clearing function call flag")
