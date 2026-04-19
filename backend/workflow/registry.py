@@ -23,7 +23,7 @@ class WorkflowPhase:
     next_phase: Optional[str] = None
 
 
-GLOBAL_TOOL_NAMES: Set[str] = {"searchKnowledgeBase", "transferToAgent"}
+GLOBAL_TOOL_NAMES: Set[str] = {"searchKnowledgeBase", "transferToAgent", "endCallSpeakerChange"}
 WORKFLOW_SELECTOR_TOOL_NAME = "selectWorkflow"
 
 

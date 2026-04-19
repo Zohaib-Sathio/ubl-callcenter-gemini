@@ -58,12 +58,6 @@ from backend.services.speaker_verification import (
     SpeakerCheckResult,
     warm_encoder as warm_speaker_encoder,
 )
-from backend.services.farewell_audio import (
-    FAREWELL_TEXT,
-    FAREWELL_SAMPLE_RATE,
-    get_farewell_pcm,
-    prewarm_farewell_audio,
-)
 from backend.services.gemini_live import (
     GeminiLiveClient,
     GeminiLiveConfig,
@@ -286,7 +280,6 @@ app = FastAPI()
 async def startup_prewarm():
     asyncio.create_task(prewarm_embeddings())
     asyncio.create_task(warm_speaker_encoder())
-    asyncio.create_task(prewarm_farewell_audio())
 
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "ubl-digital-ai-call-center-secret-key-2024")
@@ -320,35 +313,20 @@ RATE = 8000
 call_metadata: dict[str, dict] = {}
 
 
-_FAREWELL_CHUNK_BYTES = 8192  # ~170ms per chunk at 24kHz mono 16-bit
-
-
-async def _send_farewell_pcm(websocket: WebSocket, pcm: bytes) -> float:
-    """Stream the pre-rendered farewell PCM to the browser in ~170ms chunks,
-    pacing the sends so the WebSocket buffer doesn't flood. Returns the
-    approximate audio duration in seconds so the caller can sleep out the tail
-    before closing."""
-    total_samples = len(pcm) // 2
-    duration_s = total_samples / FAREWELL_SAMPLE_RATE
-    # Interrupt any in-flight Gemini playback on the client first
-    try:
-        await websocket.send_json({"event": "clear"})
-    except Exception:
-        pass
-    for offset in range(0, len(pcm), _FAREWELL_CHUNK_BYTES):
-        chunk = pcm[offset : offset + _FAREWELL_CHUNK_BYTES]
-        payload = base64.b64encode(chunk).decode("utf-8")
-        await websocket.send_json({
-            "event": "media",
-            "media": {
-                "payload": payload,
-                "format": "raw_pcm",
-                "sampleRate": FAREWELL_SAMPLE_RATE,
-                "channels": 1,
-                "bitDepth": 16,
-            },
-        })
-    return duration_s
+FAREWELL_MESSAGE = (
+    "We have detected second person with you, thats why we are redirecting "
+    "you to human agent"
+)
+SPEAKER_HANDOFF_TOOL_NAME = "endCallSpeakerChange"
+SPEAKER_HANDOFF_TRIGGER_TEXT = (
+    "[SECURITY_HANDOFF] A second person has been detected on the line. "
+    "Respond ONLY with the following sentence, in English, verbatim, and "
+    "immediately after speaking it call the tool `endCallSpeakerChange` "
+    "with no arguments. Do not call any other tool. Do not translate. Do "
+    f"not add anything else. Sentence: \"{FAREWELL_MESSAGE}\""
+)
+FAREWELL_MAX_WAIT_SECONDS = 15.0
+FAREWELL_TAIL_SECONDS = 1.5  # let any in-flight audio chunks finish playing
 
 
 async def _handle_speaker_mismatch(
@@ -356,10 +334,11 @@ async def _handle_speaker_mismatch(
     gemini_client,
     call_id: str | None,
     result: SpeakerCheckResult,
+    farewell_state: dict,
 ) -> None:
-    """Flag the call, play the pre-rendered farewell PCM so the customer
-    *always* hears the handoff message, then close the WebSocket with code
-    4001 when the primary speaker has changed mid-call."""
+    """Flag the call, ask Gemini to speak the handoff message (via the
+    `endCallSpeakerChange` tool signal), wait for playback to finish, then
+    close the WebSocket with code 4001."""
     similarity = result.similarity
     print(
         f"🚨 [SECURITY] Primary speaker change detected for call {call_id} "
@@ -375,14 +354,6 @@ async def _handle_speaker_mismatch(
         {"similarity": similarity, "threshold_breached": True},
     )
 
-    # Stop Gemini from talking over the farewell audio. We cut it *before*
-    # playing the farewell so its remaining output cannot race our PCM.
-    if gemini_client is not None:
-        try:
-            await gemini_client.close()
-        except Exception as e:
-            print(f"⚠️ Failed to close Gemini session cleanly: {e}")
-
     try:
         await websocket.send_json({
             "event": "speaker_changed",
@@ -393,36 +364,58 @@ async def _handle_speaker_mismatch(
     except Exception as e:
         print(f"⚠️ Failed to send speaker_changed event: {e}")
 
-    # Always send the textual event so the UI can render it even if audio
-    # playback on the client is muted or blocked.
-    try:
-        await websocket.send_json({
-            "event": "agent_message",
-            "text": FAREWELL_TEXT,
-        })
-    except Exception:
-        pass
-
-    farewell_pcm = await get_farewell_pcm()
-    if farewell_pcm:
+    farewell_delivered = False
+    if gemini_client is not None:
+        farewell_state["event"].clear()
+        farewell_state["active"] = True
+        farewell_state["audio_bytes"] = 0
+        farewell_state["tool_ack"] = False
         try:
             farewell_start = time.time()
-            duration_s = await _send_farewell_pcm(websocket, farewell_pcm)
-            # Give the browser time to actually play the audio before we
-            # yank the WebSocket out from under it. Add a small tail buffer.
-            await asyncio.sleep(duration_s + 0.3)
-            print(
-                f"⏱️ [SECURITY TIMING] call={call_id} "
-                f"farewell_playback_ms={(time.time() - farewell_start) * 1000.0:.0f} "
-                f"audio_duration_s={duration_s:.2f}"
-            )
+            await gemini_client.send_text(SPEAKER_HANDOFF_TRIGGER_TEXT)
+            print(f"🗣️ [SECURITY] Handoff directive sent to Gemini for call {call_id}")
+            try:
+                await asyncio.wait_for(
+                    farewell_state["event"].wait(),
+                    timeout=FAREWELL_MAX_WAIT_SECONDS,
+                )
+                await asyncio.sleep(FAREWELL_TAIL_SECONDS)
+                farewell_delivered = farewell_state["audio_bytes"] > 0
+                print(
+                    f"⏱️ [SECURITY TIMING] call={call_id} "
+                    f"farewell_total_ms={(time.time() - farewell_start) * 1000.0:.0f} "
+                    f"audio_bytes={farewell_state['audio_bytes']} "
+                    f"tool_ack={farewell_state['tool_ack']}"
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"⚠️ [SECURITY] Farewell timed out after "
+                    f"{FAREWELL_MAX_WAIT_SECONDS}s "
+                    f"(audio_bytes={farewell_state['audio_bytes']}, "
+                    f"tool_ack={farewell_state['tool_ack']})"
+                )
+                farewell_delivered = farewell_state["audio_bytes"] > 0
         except Exception as e:
-            print(f"⚠️ [SECURITY] Failed to stream farewell PCM: {e}")
-    else:
-        print(
-            f"❌ [SECURITY] No farewell PCM available for call {call_id} "
-            f"— closing without audio playback"
-        )
+            print(f"⚠️ [SECURITY] Failed to drive Gemini farewell: {e}")
+            traceback.print_exc()
+        finally:
+            farewell_state["active"] = False
+
+        try:
+            await gemini_client.close()
+        except Exception as e:
+            print(f"⚠️ Failed to close Gemini session cleanly: {e}")
+
+    if not farewell_delivered:
+        # Audible path failed — at minimum surface the message as a text event
+        # so the UI can render it before the socket dies.
+        try:
+            await websocket.send_json({
+                "event": "agent_message",
+                "text": FAREWELL_MESSAGE,
+            })
+        except Exception:
+            pass
 
     try:
         await websocket.close(code=4001, reason="speaker_changed")
@@ -702,6 +695,11 @@ def generate_silence(duration_sec, sample_rate=8000):
 
 async def execute_function_call(func_name: str, func_args: dict, call_id: str | None = None) -> dict:
     try:
+        if func_name == SPEAKER_HANDOFF_TOOL_NAME:
+            # Normally short-circuited in receive_from_gemini_and_forward;
+            # this fallback just acks without routing through workflow gating.
+            return {"acknowledged": True}
+
         if func_name == WORKFLOW_SELECTOR_TOOL_NAME:
             workflow_id = func_args.get("workflowId", "")
             reason = func_args.get("reason", "")
@@ -1049,6 +1047,13 @@ async def media_stream_browser(websocket: WebSocket):
     _suppress_post_tool_audio = False  # True = drop all post-tool audio until turn_complete
     _turn_audio_bytes = 0  # Track audio bytes sent to browser in current turn
 
+    farewell_state: dict = {
+        "active": False,
+        "event": asyncio.Event(),
+        "audio_bytes": 0,
+        "tool_ack": False,
+    }
+
     token_tracker: TokenTracker | None = None
     
     try:
@@ -1223,8 +1228,12 @@ async def media_stream_browser(websocket: WebSocket):
                                 _audio_sent_before_tool = True
 
                             # Drop audio chunks when suppressing post-tool duplicates
-                            if _suppress_post_tool_audio:
+                            # — but never drop the security-handoff farewell.
+                            if _suppress_post_tool_audio and not farewell_state["active"]:
                                 continue
+
+                            if farewell_state["active"]:
+                                farewell_state["audio_bytes"] += len(pcm_24khz)
 
                             _turn_audio_bytes += len(pcm_24khz)
                             pcm_b64 = base64.b64encode(pcm_24khz).decode('utf-8')
@@ -1245,11 +1254,32 @@ async def media_stream_browser(websocket: WebSocket):
                                 func_name = tool_call.get("name")
                                 func_id = tool_call.get("id")
                                 func_args = tool_call.get("arguments", {})
-                                
+
+                                if func_name == SPEAKER_HANDOFF_TOOL_NAME:
+                                    print(
+                                        f"🛑 [SECURITY] {SPEAKER_HANDOFF_TOOL_NAME} "
+                                        f"invoked by Gemini for call {call_id}"
+                                    )
+                                    try:
+                                        await gemini_client.send_tool_response([{
+                                            "id": func_id,
+                                            "name": func_name,
+                                            "response": {"acknowledged": True},
+                                        }])
+                                    except Exception as ack_err:
+                                        print(
+                                            f"⚠️ [SECURITY] Failed to ack "
+                                            f"{SPEAKER_HANDOFF_TOOL_NAME}: {ack_err}"
+                                        )
+                                    if farewell_state["active"]:
+                                        farewell_state["tool_ack"] = True
+                                        farewell_state["event"].set()
+                                    continue
+
                                 _tool_call_received_at = time.time()
                                 _tool_func_name = func_name
                                 _first_audio_after_tool = True
-                                
+
                                 print(f"🔧 Function call: {func_name} with args: {func_args}")
                                 
                                 exec_start = time.time()
@@ -1309,6 +1339,8 @@ async def media_stream_browser(websocket: WebSocket):
                                 _tool_call_received_at = None
                                 _tool_response_sent_at = None
                             print(f"📋 Gemini turn complete")
+                            if farewell_state["active"]:
+                                farewell_state["event"].set()
                             if function_call_completed_time is not None:
                                 print(f"✅ Response completed, clearing function call flag")
                                 function_call_completed_time = None
@@ -1385,7 +1417,7 @@ async def media_stream_browser(websocket: WebSocket):
                     continue
                 if result is not None and result.mismatch_confirmed:
                     await _handle_speaker_mismatch(
-                        websocket, gemini_client, call_id, result
+                        websocket, gemini_client, call_id, result, farewell_state
                     )
                     return
 

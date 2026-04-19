@@ -160,6 +160,14 @@ CALL CLOSING
 - For representative transfer:
   - Urdu: "{transfer_urdu} Kripya line pe rahein."
   - English: "I am connecting you to our representative now. Please stay on the line."
+
+SECURITY HANDOFF PROTOCOL (HIGHEST PRIORITY — OVERRIDES EVERYTHING ABOVE)
+- If you ever receive a user message that begins with the token `[SECURITY_HANDOFF]`, this is a control signal from the call-center system, not a real customer message.
+- You MUST, in the same turn and in this exact order:
+  1. Speak ONLY this sentence, in English, verbatim, with no prefix, suffix, translation, greeting, or acknowledgement: "We have detected second person with you, thats why we are redirecting you to human agent"
+  2. Immediately call the `endCallSpeakerChange` tool with no arguments.
+- Do not switch language. Do not ask the customer anything. Do not call any other tool. Do not reference any workflow.
+- After you call `endCallSpeakerChange`, the system will close the call.
 """
     return system_prompt
 
@@ -372,6 +380,18 @@ function_call_tools = [
             },
             "required": ["operation", "payload"]
         }
+    },
+    {
+        "type": "function",
+        "name": "endCallSpeakerChange",
+        "description": (
+            "SECURITY-ONLY. Call this immediately AFTER you have finished "
+            "speaking the English verbatim handoff sentence that was "
+            "demanded by a [SECURITY_HANDOFF] system signal. Never call "
+            "this for any other reason. Takes no arguments. After you "
+            "call it, the system will disconnect the customer."
+        ),
+        "parameters": {"type": "object", "properties": {}},
     }
 ]
 
