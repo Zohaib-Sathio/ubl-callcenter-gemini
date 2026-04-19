@@ -221,5 +221,14 @@ class SpeakerVerifier:
 
 
 async def warm_encoder() -> None:
-    """Call once on app startup to pay the model-load cost early."""
-    await get_encoder()
+    """Call once on app startup to pay the model-load *and* first-forward-pass
+    cost early. Loading weights alone leaves torch's JIT/CPU kernels uninitialised,
+    so the first real embed (caller enrollment) would otherwise take tens of
+    seconds. A throwaway embed on a 1-second silent-ish clip forces that
+    initialisation to happen before any call starts."""
+    encoder = await get_encoder()
+    dummy = np.zeros(16000, dtype=np.int16)
+    t0 = time.perf_counter()
+    await asyncio.to_thread(_sync_embed, encoder, dummy, 16000)
+    warmup_ms = (time.perf_counter() - t0) * 1000.0
+    print(f"🔥 [SECURITY] VoiceEncoder warmup embed completed in {warmup_ms:.0f}ms")
