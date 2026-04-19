@@ -95,6 +95,15 @@ def _chroma_query(vector: list[float], top_k: int):
     return matches
 
 
+async def prewarm_vector_index():
+    try:
+        start = time.time()
+        await asyncio.to_thread(_chroma_query, [0.0] * _EMBED_DIMS, 1)
+        print(f"✅ Pre-warmed Chroma HNSW index in {(time.time() - start) * 1000:.0f}ms")
+    except Exception as e:
+        print(f"⚠️ Vector index pre-warm failed (non-fatal): {e}")
+
+
 async def prewarm_embeddings():
     try:
         resp = await _openai_async.embeddings.create(

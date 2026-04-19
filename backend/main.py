@@ -51,7 +51,7 @@ from backend.workflow.registry import (
     advance_phase_skipping_verified,
     build_verification_context,
 )
-from backend.services.rag_tools import search_knowledge_base, prewarm_embeddings
+from backend.services.rag_tools import search_knowledge_base, prewarm_embeddings, prewarm_vector_index
 from backend.services.audio_transcription import transcribe_audio, analyze_call_with_llm
 from backend.services.speaker_verification import (
     SpeakerVerifier,
@@ -279,6 +279,7 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_prewarm():
     asyncio.create_task(prewarm_embeddings())
+    asyncio.create_task(prewarm_vector_index())
     asyncio.create_task(warm_speaker_encoder())
 
 
