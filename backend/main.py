@@ -327,6 +327,8 @@ SPEAKER_HANDOFF_TRIGGER_TEXT = (
 )
 FAREWELL_MAX_WAIT_SECONDS = 15.0
 FAREWELL_TAIL_SECONDS = 1.5  # let any in-flight audio chunks finish playing
+FAREWELL_GRACE_SECONDS = 1.5  # ignore turn_complete fired this soon after directive
+FAREWELL_MIN_AUDIO_BYTES = 40000  # ~0.83s @ 24kHz mono 16-bit; reject stale turn_complete
 
 
 async def _handle_speaker_mismatch(
@@ -373,6 +375,8 @@ async def _handle_speaker_mismatch(
         try:
             farewell_start = time.time()
             await gemini_client.send_text(SPEAKER_HANDOFF_TRIGGER_TEXT)
+            farewell_state["directive_sent_at"] = time.time()
+            farewell_state["audio_bytes_at_directive"] = farewell_state["audio_bytes"]
             print(f"🗣️ [SECURITY] Handoff directive sent to Gemini for call {call_id}")
             try:
                 await asyncio.wait_for(
@@ -404,14 +408,6 @@ async def _handle_speaker_mismatch(
         finally:
             farewell_state["active"] = False
 
-        print(f"🛑 [SECURITY] Closing Gemini session for call {call_id}")
-        try:
-            await asyncio.wait_for(gemini_client.close(), timeout=3.0)
-        except asyncio.TimeoutError:
-            print("⚠️ [SECURITY] Gemini close timed out — continuing")
-        except Exception as e:
-            print(f"⚠️ Failed to close Gemini session cleanly: {e}")
-
     if not farewell_delivered:
         # Audible path failed — at minimum surface the message as a text event
         # so the UI can render it before the socket dies.
@@ -423,17 +419,39 @@ async def _handle_speaker_mismatch(
         except Exception:
             pass
 
+    # Close order matters: the browser WebSocket 4001 frame is the
+    # user-facing signal the frontend keys off of, and must land before
+    # Gemini's close cascades into task cancellation. Both calls are
+    # shielded so `asyncio.wait(FIRST_COMPLETED)` cancelling monitor_task
+    # cannot eat the close.
     print(f"🛑 [SECURITY] Closing browser WebSocket (code=4001) for call {call_id}")
     try:
-        await asyncio.wait_for(
-            websocket.close(code=4001, reason="speaker_changed"),
-            timeout=3.0,
+        await asyncio.shield(
+            asyncio.wait_for(
+                websocket.close(code=4001, reason="speaker_changed"),
+                timeout=3.0,
+            )
         )
         print(f"✅ [SECURITY] Browser WebSocket closed for call {call_id}")
+    except asyncio.CancelledError:
+        raise
     except asyncio.TimeoutError:
-        print(f"⚠️ [SECURITY] websocket.close() hung — forcing")
+        print(f"⚠️ [SECURITY] websocket.close() hung — continuing")
     except Exception as e:
         print(f"⚠️ [SECURITY] websocket.close error: {e}")
+
+    if gemini_client is not None:
+        print(f"🛑 [SECURITY] Closing Gemini session for call {call_id}")
+        try:
+            await asyncio.shield(
+                asyncio.wait_for(gemini_client.close(), timeout=3.0)
+            )
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            print("⚠️ [SECURITY] Gemini close timed out — continuing")
+        except Exception as e:
+            print(f"⚠️ Failed to close Gemini session cleanly: {e}")
 
 
 def _record_routing_event(call_id: str | None, event_type: str, payload: dict | None = None) -> None:
@@ -1064,6 +1082,8 @@ async def media_stream_browser(websocket: WebSocket):
         "active": False,
         "event": asyncio.Event(),
         "audio_bytes": 0,
+        "audio_bytes_at_directive": 0,
+        "directive_sent_at": 0.0,
         "tool_ack": False,
     }
 
@@ -1353,13 +1373,27 @@ async def media_stream_browser(websocket: WebSocket):
                                 _tool_response_sent_at = None
                             print(f"📋 Gemini turn complete")
                             if farewell_state["active"]:
-                                print(
-                                    f"🛑 [SECURITY] turn_complete during farewell "
-                                    f"— signalling handler (audio_bytes="
-                                    f"{farewell_state['audio_bytes']}, "
-                                    f"tool_ack={farewell_state['tool_ack']})"
+                                elapsed = time.time() - farewell_state["directive_sent_at"]
+                                post_directive_audio = (
+                                    farewell_state["audio_bytes"]
+                                    - farewell_state["audio_bytes_at_directive"]
                                 )
-                                farewell_state["event"].set()
+                                if (
+                                    elapsed >= FAREWELL_GRACE_SECONDS
+                                    and post_directive_audio >= FAREWELL_MIN_AUDIO_BYTES
+                                ):
+                                    print(
+                                        f"🛑 [SECURITY] turn_complete during farewell "
+                                        f"— signalling (elapsed={elapsed:.2f}s, "
+                                        f"post_directive_audio={post_directive_audio})"
+                                    )
+                                    farewell_state["event"].set()
+                                else:
+                                    print(
+                                        f"⏭️  [SECURITY] Ignoring stale turn_complete "
+                                        f"during farewell (elapsed={elapsed:.2f}s, "
+                                        f"post_directive_audio={post_directive_audio})"
+                                    )
                             if function_call_completed_time is not None:
                                 print(f"✅ Response completed, clearing function call flag")
                                 function_call_completed_time = None
