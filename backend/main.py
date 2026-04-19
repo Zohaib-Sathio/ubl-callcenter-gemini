@@ -313,14 +313,22 @@ RATE = 8000
 call_metadata: dict[str, dict] = {}
 
 
+FAREWELL_MESSAGE = (
+    "We have detected second person with you, thats why we are redirecting "
+    "you to human agent"
+)
+FAREWELL_MAX_WAIT_SECONDS = 8.0
+
+
 async def _handle_speaker_mismatch(
     websocket: WebSocket,
     gemini_client,
     call_id: str | None,
     result: SpeakerCheckResult,
+    farewell_state: dict,
 ) -> None:
-    """Flag the call, notify the frontend, and close the WebSocket with
-    code 4001 when the primary speaker has changed mid-call."""
+    """Flag the call, have the agent announce the handoff, then close the
+    WebSocket with code 4001 when the primary speaker has changed mid-call."""
     similarity = result.similarity
     print(
         f"🚨 [SECURITY] Primary speaker change detected for call {call_id} "
@@ -339,18 +347,59 @@ async def _handle_speaker_mismatch(
     try:
         await websocket.send_json({
             "event": "speaker_changed",
-            "message": "Primary speaker change detected. Ending call.",
+            "message": "Primary speaker change detected. Handing off to human agent.",
             "similarity": similarity,
             "severity": "critical",
         })
     except Exception as e:
         print(f"⚠️ Failed to send speaker_changed event: {e}")
 
+    farewell_sent = False
     if gemini_client is not None:
+        try:
+            farewell_state["event"].clear()
+            farewell_state["active"] = True
+            directive = (
+                "Say the following to the customer verbatim and then stop: "
+                f"\"{FAREWELL_MESSAGE}\". Do not add anything else."
+            )
+            farewell_start = time.time()
+            await gemini_client.send_text(directive)
+            farewell_sent = True
+            print(f"🗣️ [SECURITY] Farewell directive sent to Gemini for call {call_id}")
+            try:
+                await asyncio.wait_for(
+                    farewell_state["event"].wait(),
+                    timeout=FAREWELL_MAX_WAIT_SECONDS,
+                )
+                farewell_ms = (time.time() - farewell_start) * 1000.0
+                print(
+                    f"⏱️ [SECURITY TIMING] call={call_id} farewell_playback_ms="
+                    f"{farewell_ms:.0f}"
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"⚠️ [SECURITY] Farewell timed out after "
+                    f"{FAREWELL_MAX_WAIT_SECONDS}s — closing anyway"
+                )
+        except Exception as e:
+            print(f"⚠️ Failed to deliver farewell via Gemini: {e}")
+        finally:
+            farewell_state["active"] = False
+
         try:
             await gemini_client.close()
         except Exception as e:
             print(f"⚠️ Failed to close Gemini session cleanly: {e}")
+
+    if not farewell_sent:
+        try:
+            await websocket.send_json({
+                "event": "agent_message",
+                "text": FAREWELL_MESSAGE,
+            })
+        except Exception:
+            pass
 
     try:
         await websocket.close(code=4001, reason="speaker_changed")
@@ -977,6 +1026,8 @@ async def media_stream_browser(websocket: WebSocket):
     _suppress_post_tool_audio = False  # True = drop all post-tool audio until turn_complete
     _turn_audio_bytes = 0  # Track audio bytes sent to browser in current turn
 
+    farewell_state: dict = {"active": False, "event": asyncio.Event()}
+
     token_tracker: TokenTracker | None = None
     
     try:
@@ -1237,6 +1288,8 @@ async def media_stream_browser(websocket: WebSocket):
                                 _tool_call_received_at = None
                                 _tool_response_sent_at = None
                             print(f"📋 Gemini turn complete")
+                            if farewell_state["active"]:
+                                farewell_state["event"].set()
                             if function_call_completed_time is not None:
                                 print(f"✅ Response completed, clearing function call flag")
                                 function_call_completed_time = None
@@ -1313,7 +1366,7 @@ async def media_stream_browser(websocket: WebSocket):
                     continue
                 if result is not None and result.mismatch_confirmed:
                     await _handle_speaker_mismatch(
-                        websocket, gemini_client, call_id, result
+                        websocket, gemini_client, call_id, result, farewell_state
                     )
                     return
 

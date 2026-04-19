@@ -10,6 +10,7 @@ similarity threshold, to absorb single-window noise.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -76,6 +77,13 @@ class SpeakerVerifier:
         self._check_in_flight = False
         self._chunks_since_last_log = 0
 
+        self._first_audio_at: Optional[float] = None
+        self._enrollment_ms: Optional[float] = None
+        self._total_embed_ms = 0.0
+        self._embed_count = 0
+        self._total_add_audio_ms = 0.0
+        self._add_audio_count = 0
+
     @property
     def mismatch_confirmed(self) -> bool:
         return self._mismatch_confirmed
@@ -85,13 +93,18 @@ class SpeakerVerifier:
         enrollment/window thresholds count *voiced* audio only."""
         if self._mismatch_confirmed or not pcm_bytes:
             return
+        t0 = time.perf_counter()
         arr = np.frombuffer(pcm_bytes, dtype=np.int16)
         if arr.size == 0:
             return
         rms = float(np.sqrt(np.mean(arr.astype(np.float32) ** 2)))
         if rms < _ENERGY_RMS_MIN:
             return
+        if self._first_audio_at is None:
+            self._first_audio_at = time.time()
         self._voiced_buffer = np.concatenate([self._voiced_buffer, arr])
+        self._total_add_audio_ms += (time.perf_counter() - t0) * 1000.0
+        self._add_audio_count += 1
 
     async def maybe_check(self) -> Optional[SpeakerCheckResult]:
         """Run enrollment or a comparison window if enough new voiced audio
@@ -107,14 +120,23 @@ class SpeakerVerifier:
             self._check_in_flight = True
             try:
                 clip = self._voiced_buffer[: self.enrollment_samples].copy()
+                embed_start = time.perf_counter()
                 embedding = await asyncio.to_thread(
                     _sync_embed, encoder, clip, self.sample_rate
                 )
+                embed_ms = (time.perf_counter() - embed_start) * 1000.0
                 self._reference_embedding = embedding
                 self._enrolled_consumed = self.enrollment_samples
+                self._enrollment_ms = embed_ms
+                self._total_embed_ms += embed_ms
+                self._embed_count += 1
                 print(
                     f"🔒 [SECURITY] call={self.call_id} primary speaker enrolled "
                     f"(voiced_samples={self._voiced_buffer.size}, emb_dim={embedding.shape[0]})"
+                )
+                print(
+                    f"⏱️  [SECURITY TIMING] call={self.call_id} enrollment_embed_ms={embed_ms:.1f} "
+                    f"clip_samples={clip.size}"
                 )
                 return SpeakerCheckResult(
                     kind="enrolled", similarity=None, mismatch_confirmed=False
@@ -133,10 +155,26 @@ class SpeakerVerifier:
             clip = self._voiced_buffer[start:end].copy()
             self._enrolled_consumed = end
 
+            embed_start = time.perf_counter()
             embedding = await asyncio.to_thread(
                 _sync_embed, encoder, clip, self.sample_rate
             )
+            embed_ms = (time.perf_counter() - embed_start) * 1000.0
+            self._total_embed_ms += embed_ms
+            self._embed_count += 1
+
+            sim_start = time.perf_counter()
             similarity = float(np.dot(self._reference_embedding, embedding))
+            sim_ms = (time.perf_counter() - sim_start) * 1000.0
+
+            avg_embed = self._total_embed_ms / max(self._embed_count, 1)
+            avg_add = self._total_add_audio_ms / max(self._add_audio_count, 1)
+            print(
+                f"⏱️  [SECURITY TIMING] call={self.call_id} window_embed_ms={embed_ms:.1f} "
+                f"cosine_ms={sim_ms:.2f} embeds_run={self._embed_count} "
+                f"avg_embed_ms={avg_embed:.1f} avg_add_audio_ms={avg_add:.3f} "
+                f"total_embed_ms={self._total_embed_ms:.1f}"
+            )
 
             if similarity < self.similarity_threshold:
                 self._consecutive_below += 1
@@ -147,6 +185,18 @@ class SpeakerVerifier:
                 )
                 if self._consecutive_below >= self.consecutive_failures_to_flag:
                     self._mismatch_confirmed = True
+                    detection_latency_s = (
+                        time.time() - self._first_audio_at
+                        if self._first_audio_at is not None
+                        else float("nan")
+                    )
+                    print(
+                        f"⏱️  [SECURITY TIMING] call={self.call_id} MISMATCH_CONFIRMED "
+                        f"detection_latency_s={detection_latency_s:.2f} "
+                        f"embeds_run={self._embed_count} "
+                        f"total_embed_ms={self._total_embed_ms:.1f} "
+                        f"enrollment_ms={self._enrollment_ms or 0.0:.1f}"
+                    )
                     return SpeakerCheckResult(
                         kind="mismatch",
                         similarity=similarity,
