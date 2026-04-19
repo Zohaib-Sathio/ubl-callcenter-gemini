@@ -322,8 +322,8 @@ SPEAKER_HANDOFF_TRIGGER_TEXT = (
     "[SECURITY_HANDOFF] A second person has been detected on the line. "
     "Respond ONLY with the following sentence, in English, verbatim, and "
     "immediately after speaking it call the tool `endCallSpeakerChange` "
-    "with no arguments. Do not call any other tool. Do not translate. Do "
-    f"not add anything else. Sentence: \"{FAREWELL_MESSAGE}\""
+    "with reason=\"second_speaker_detected\". Do not call any other tool. "
+    f"Do not translate. Do not add anything else. Sentence: \"{FAREWELL_MESSAGE}\""
 )
 FAREWELL_MAX_WAIT_SECONDS = 15.0
 FAREWELL_TAIL_SECONDS = 1.5  # let any in-flight audio chunks finish playing
