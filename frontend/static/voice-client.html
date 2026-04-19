@@ -610,6 +610,38 @@
     }
 
     let callSessionTokenUsage = null;
+    let callActive = false;
+
+    function endCallUI({ triggerAnalysis = true } = {}) {
+      if (!callActive) return;
+      callActive = false;
+
+      stopBtn.disabled = true;
+      startBtn.disabled = false;
+      speedSlider.disabled = false;
+      statusContainer.classList.add("hidden");
+      statusContainer.classList.remove("flex");
+
+      clearAudioQueue();
+      if (micProc) {
+        try { micProc.disconnect(); micProc.port.onmessage = null; } catch (e) {}
+        micProc = null;
+      }
+      if (micSource) {
+        try { micSource.disconnect(); } catch (e) {}
+        micSource = null;
+      }
+      if (micContext && micContext.state !== "closed") {
+        try { micContext.close(); } catch (e) {}
+      }
+
+      stopCallTimer();
+      logTokenUsageSummary();
+
+      if (triggerAnalysis && call_id && window.ublCallAnalysis) {
+        window.ublCallAnalysis.startAnalysisCountdown(call_id);
+      }
+    }
 
     startBtn.onclick = async () => {
       startBtn.disabled = true;
@@ -655,6 +687,8 @@
         log("WebSocket connected");
         const token = localStorage.getItem(JWT_TOKEN_KEY);
         ws.send(JSON.stringify({ event: "start", start: { streamSid: "browser-stream-" + Math.random().toString(36).slice(2, 8), callSid: "browser-call-" + Math.random().toString(36).slice(2, 8), customParameters: { call_id: call_id, token: token } } }));
+        callActive = true;
+        stopBtn.disabled = false;
         startCallTimer();
       });
 
@@ -709,14 +743,13 @@
           if (securityAlertEl) securityAlertEl.classList.remove("hidden");
           log("🚨 Security: call terminated by server (speaker changed)");
         }
-        logTokenUsageSummary();
-        statusContainer.classList.add("hidden");
-        statusContainer.classList.remove("flex");
-        speedSlider.disabled = false;
-        stopCallTimer();
+        endCallUI();
       });
 
-      ws.addEventListener("error", (err) => { log("⚠️ WebSocket error occurred"); });
+      ws.addEventListener("error", (err) => {
+        log("⚠️ WebSocket error occurred");
+        endCallUI();
+      });
 
       // Use 16kHz sample rate to match Gemini's native input format (eliminates server-side resampling)
       micContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: MIC_SAMPLE_RATE });
@@ -800,21 +833,12 @@
     };
 
     stopBtn.onclick = () => {
-      stopBtn.disabled = true;
-      statusContainer.classList.add("hidden");
-      statusContainer.classList.remove("flex");
-      clearAudioQueue();
-      if (micProc) { micProc.disconnect(); micProc.port.onmessage = null; }
-      if (micSource) micSource.disconnect();
-      if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ event: "stop" })); ws.close(); }
-      speedSlider.disabled = false;
-      startBtn.disabled = false;
-      log("Call ended");
-      logTokenUsageSummary();
-      stopCallTimer();
-      if (call_id && window.ublCallAnalysis) {
-        window.ublCallAnalysis.startAnalysisCountdown(call_id);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ event: "stop" }));
+        ws.close();
       }
+      log("Call ended");
+      endCallUI();
     };
 
     document.addEventListener("DOMContentLoaded", async () => {
