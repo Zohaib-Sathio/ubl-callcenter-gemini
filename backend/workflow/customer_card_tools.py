@@ -2,6 +2,25 @@ import json
 import time
 from typing import Dict, Optional, Any
 
+
+def _normalize_cnic(cnic: str) -> str:
+    return (cnic or "").replace("-", "").replace(" ", "")
+
+
+def _lookup_customer(cnic: str) -> Optional[Dict[str, Any]]:
+    normalized = _normalize_cnic(cnic)
+    if not normalized:
+        return None
+    for key, data in CUSTOMER_CARDS.items():
+        if _normalize_cnic(key) == normalized:
+            return data
+    return None
+
+
+def _normalize_digits(value: str) -> str:
+    return "".join(ch for ch in (value or "") if ch.isdigit())
+
+
 CUSTOMER_CARDS: Dict[str, Dict[str, Any]] = {
     "42101-1234567-9": {
         "cnic": "42101-1234567-9",
@@ -47,43 +66,41 @@ CUSTOMER_CARDS: Dict[str, Dict[str, Any]] = {
 async def verify_customer_by_cnic(cnic: str) -> dict:
     try:
         print(f"→ verify_customer_by_cnic: {cnic} @ {time.time()}")
-        
-        normalized_cnic = cnic.replace("-", "").replace(" ", "")
-        
-        for stored_cnic, customer_data in CUSTOMER_CARDS.items():
-            if stored_cnic.replace("-", "").replace(" ", "") == normalized_cnic:
-                customer_data["verification_attempts"]["cnic"] += 1
-                
-                if customer_data["verification_attempts"]["cnic"] > customer_data["max_attempts"]:
-                    return {
-                        "success": False,
-                        "error": "Maximum verification attempts exceeded",
-                        "transfer_to_agent": True,
-                        "message": "Customer has exceeded maximum CNIC verification attempts. Transfer to human agent required."
-                    }
-                
-                print(f"✅ verify_customer_by_cnic: Found customer {customer_data['full_name']} @ {time.time()}")
-                
-                return {
-                    "success": True,
-                    "customer": {
-                        "cnic": customer_data["cnic"],
-                        "full_name": customer_data["full_name"],
-                        "mother_maiden_name": customer_data["mother_maiden_name"],
-                        "registered_mobile": customer_data["registered_mobile"],
-                        "has_debit_card": True,
-                        "card_activated": customer_data["debit_card"]["is_activated"]
-                    },
-                    "verification_attempts": customer_data["verification_attempts"]["cnic"],
-                    "max_attempts": customer_data["max_attempts"],
-                    "message": f"Customer {customer_data['full_name']} verified successfully by CNIC."
-                }
-        
-        print(f"⚠️ verify_customer_by_cnic: Customer not found with CNIC {cnic} @ {time.time()}")
+
+        customer_data = _lookup_customer(cnic)
+        if customer_data is None:
+            print(f"⚠️ verify_customer_by_cnic: Customer not found with CNIC {cnic} @ {time.time()}")
+            return {
+                "success": False,
+                "error": "Customer not found",
+                "message": "No customer found with this CNIC number. Please verify the CNIC and try again."
+            }
+
+        customer_data["verification_attempts"]["cnic"] += 1
+
+        if customer_data["verification_attempts"]["cnic"] > customer_data["max_attempts"]:
+            return {
+                "success": False,
+                "error": "Maximum verification attempts exceeded",
+                "transfer_to_agent": True,
+                "message": "Customer has exceeded maximum CNIC verification attempts. Transfer to human agent required."
+            }
+
+        print(f"✅ verify_customer_by_cnic: Found customer {customer_data['full_name']} @ {time.time()}")
+
         return {
-            "success": False,
-            "error": "Customer not found",
-            "message": "No customer found with this CNIC number. Please verify the CNIC and try again."
+            "success": True,
+            "customer": {
+                "cnic": customer_data["cnic"],
+                "full_name": customer_data["full_name"],
+                "mother_maiden_name": customer_data["mother_maiden_name"],
+                "registered_mobile": customer_data["registered_mobile"],
+                "has_debit_card": True,
+                "card_activated": customer_data["debit_card"]["is_activated"]
+            },
+            "verification_attempts": customer_data["verification_attempts"]["cnic"],
+            "max_attempts": customer_data["max_attempts"],
+            "message": f"Customer {customer_data['full_name']} verified successfully by CNIC."
         }
         
     except Exception as e:
@@ -99,7 +116,7 @@ async def confirm_physical_custody(cnic: str, has_card: bool) -> dict:
     try:
         print(f"→ confirm_physical_custody: {cnic}, has_card={has_card} @ {time.time()}")
         
-        customer_data = CUSTOMER_CARDS.get(cnic)
+        customer_data = _lookup_customer(cnic)
         if not customer_data:
             return {
                 "success": False,
@@ -136,19 +153,19 @@ async def confirm_physical_custody(cnic: str, has_card: bool) -> dict:
 async def verify_tpin(cnic: str, tpin: str) -> dict:
     try:
         print(f"→ verify_tpin: {cnic} @ {time.time()}")
-        
-        customer_data = CUSTOMER_CARDS.get(cnic)
+
+        customer_data = _lookup_customer(cnic)
         if not customer_data:
             return {
                 "success": False,
                 "error": "Customer not found",
                 "message": "Customer data not found. Please verify CNIC first."
             }
-        
+
         customer_data["verification_attempts"]["tpin"] += 1
         attempts = customer_data["verification_attempts"]["tpin"]
         max_attempts = customer_data["max_attempts"]
-        
+
         if attempts > max_attempts:
             print(f"⚠️ verify_tpin: Max attempts exceeded @ {time.time()}")
             return {
@@ -159,8 +176,8 @@ async def verify_tpin(cnic: str, tpin: str) -> dict:
                 "max_attempts": max_attempts,
                 "message": "Maximum TPIN verification attempts exceeded. Transferring to human agent for security."
             }
-        
-        if tpin == customer_data["tpin"]:
+
+        if _normalize_digits(tpin) == customer_data["tpin"]:
             customer_data["tpin_verified"] = True
             print(f"✅ verify_tpin: TPIN verified for {customer_data['full_name']} @ {time.time()}")
             return {
@@ -196,7 +213,7 @@ async def verify_card_details(cnic: str, last_four_digits: str, expiry_date: str
     try:
         print(f"→ verify_card_details: {cnic}, last4={last_four_digits}, expiry={expiry_date} @ {time.time()}")
         
-        customer_data = CUSTOMER_CARDS.get(cnic)
+        customer_data = _lookup_customer(cnic)
         if not customer_data:
             return {
                 "success": False,
@@ -274,7 +291,7 @@ async def activate_card(cnic: str) -> dict:
     try:
         print(f"→ activate_card: {cnic} @ {time.time()}")
         
-        customer_data = CUSTOMER_CARDS.get(cnic)
+        customer_data = _lookup_customer(cnic)
         if not customer_data:
             return {
                 "success": False,
@@ -321,7 +338,7 @@ async def update_customer_tpin(cnic: str, new_tpin: str) -> dict:
     try:
         print(f"→ update_customer_tpin: {cnic} @ {time.time()}")
         
-        customer_data = CUSTOMER_CARDS.get(cnic)
+        customer_data = _lookup_customer(cnic)
         if not customer_data:
             return {
                 "success": False,
@@ -380,7 +397,7 @@ async def transfer_to_agent(cnic: str, reason: str) -> dict:
     try:
         print(f"→ transfer_to_agent: {cnic}, reason={reason} @ {time.time()}")
         
-        customer_data = CUSTOMER_CARDS.get(cnic, {})
+        customer_data = _lookup_customer(cnic) or {}
         customer_name = customer_data.get("full_name", "Customer")
         
         print(f"✅ transfer_to_agent: Transfer initiated for {customer_name} @ {time.time()}")
@@ -402,7 +419,7 @@ async def transfer_to_agent(cnic: str, reason: str) -> dict:
 
 async def get_customer_status(cnic: str) -> dict:
     try:
-        customer_data = CUSTOMER_CARDS.get(cnic)
+        customer_data = _lookup_customer(cnic)
         if not customer_data:
             return {
                 "success": False,
@@ -428,7 +445,7 @@ async def get_customer_status(cnic: str) -> dict:
 
 async def get_account_balance(cnic: str, account_selector: str) -> dict:
     try:
-        customer_data = CUSTOMER_CARDS.get(cnic)
+        customer_data = _lookup_customer(cnic)
         if not customer_data:
             return {
                 "success": False,
@@ -526,7 +543,7 @@ async def get_account_balance(cnic: str, account_selector: str) -> dict:
 
 async def reset_verification_attempts(cnic: str) -> dict:
     try:
-        customer_data = CUSTOMER_CARDS.get(cnic)
+        customer_data = _lookup_customer(cnic)
         if not customer_data:
             return {
                 "success": False,
