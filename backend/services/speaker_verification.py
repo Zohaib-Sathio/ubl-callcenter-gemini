@@ -20,6 +20,7 @@ from resemblyzer import VoiceEncoder, preprocess_wav
 
 _SAMPLE_WIDTH_BYTES = 2  # int16 PCM
 _ENERGY_RMS_MIN = 300.0  # int16 RMS gate to skip silence from enrollment window
+_ENERGY_MEAN_SQ_MIN = _ENERGY_RMS_MIN * _ENERGY_RMS_MIN  # compare mean(x^2) to skip sqrt on hot path
 
 
 @dataclass
@@ -67,9 +68,14 @@ class SpeakerVerifier:
         self.window_samples = int(window_seconds * sample_rate)
         self.similarity_threshold = similarity_threshold
 
-        self._voiced_buffer = np.empty(0, dtype=np.int16)
+        # Voiced audio waiting to be embedded. Kept as a list of chunks so
+        # add_audio is O(1) — we only concatenate the exact slice we need
+        # when an enrollment or window check actually runs, and consumed
+        # samples are dropped immediately so memory never grows with call
+        # duration.
+        self._pending_chunks: list[np.ndarray] = []
+        self._pending_samples = 0
         self._reference_embedding: Optional[np.ndarray] = None
-        self._enrolled_consumed = 0
         self._check_in_flight = False
         self._secondary_active = False
 
@@ -94,14 +100,37 @@ class SpeakerVerifier:
         arr = np.frombuffer(pcm_bytes, dtype=np.int16)
         if arr.size == 0:
             return
-        rms = float(np.sqrt(np.mean(arr.astype(np.float32) ** 2)))
-        if rms < _ENERGY_RMS_MIN:
+        mean_sq = float(np.mean(arr.astype(np.float32) ** 2))
+        if mean_sq < _ENERGY_MEAN_SQ_MIN:
             return
         if self._first_audio_at is None:
             self._first_audio_at = time.time()
-        self._voiced_buffer = np.concatenate([self._voiced_buffer, arr])
+        # np.frombuffer returns a read-only view on pcm_bytes; copy so the
+        # underlying buffer can be released immediately.
+        self._pending_chunks.append(arr.copy())
+        self._pending_samples += arr.size
         self._total_add_audio_ms += (time.perf_counter() - t0) * 1000.0
         self._add_audio_count += 1
+
+    def _take_samples(self, n: int) -> np.ndarray:
+        """Pop the first n voiced samples out of the pending chunk list.
+        Fully consumed chunks are discarded, so _pending_samples stays
+        bounded by ~window_samples + one in-flight chunk."""
+        out = np.empty(n, dtype=np.int16)
+        written = 0
+        while written < n and self._pending_chunks:
+            chunk = self._pending_chunks[0]
+            take = n - written
+            if chunk.size <= take:
+                out[written:written + chunk.size] = chunk
+                written += chunk.size
+                self._pending_chunks.pop(0)
+            else:
+                out[written:written + take] = chunk[:take]
+                self._pending_chunks[0] = chunk[take:]
+                written += take
+        self._pending_samples -= written
+        return out
 
     async def maybe_check(self) -> Optional[SpeakerCheckResult]:
         """Run enrollment or a comparison window if enough new voiced audio
@@ -112,24 +141,23 @@ class SpeakerVerifier:
         encoder = await get_encoder()
 
         if self._reference_embedding is None:
-            if self._voiced_buffer.size < self.enrollment_samples:
+            if self._pending_samples < self.enrollment_samples:
                 return None
             self._check_in_flight = True
             try:
-                clip = self._voiced_buffer[: self.enrollment_samples].copy()
+                clip = self._take_samples(self.enrollment_samples)
                 embed_start = time.perf_counter()
                 embedding = await asyncio.to_thread(
                     _sync_embed, encoder, clip, self.sample_rate
                 )
                 embed_ms = (time.perf_counter() - embed_start) * 1000.0
                 self._reference_embedding = embedding
-                self._enrolled_consumed = self.enrollment_samples
                 self._enrollment_ms = embed_ms
                 self._total_embed_ms += embed_ms
                 self._embed_count += 1
                 print(
                     f"🔒 [SECURITY] call={self.call_id} primary speaker enrolled "
-                    f"(voiced_samples={self._voiced_buffer.size}, emb_dim={embedding.shape[0]})"
+                    f"(clip_samples={clip.size}, emb_dim={embedding.shape[0]})"
                 )
                 print(
                     f"⏱️  [SECURITY TIMING] call={self.call_id} enrollment_embed_ms={embed_ms:.1f} "
@@ -139,16 +167,12 @@ class SpeakerVerifier:
             finally:
                 self._check_in_flight = False
 
-        available = self._voiced_buffer.size - self._enrolled_consumed
-        if available < self.window_samples:
+        if self._pending_samples < self.window_samples:
             return None
 
         self._check_in_flight = True
         try:
-            start = self._enrolled_consumed
-            end = start + self.window_samples
-            clip = self._voiced_buffer[start:end].copy()
-            self._enrolled_consumed = end
+            clip = self._take_samples(self.window_samples)
 
             embed_start = time.perf_counter()
             embedding = await asyncio.to_thread(
