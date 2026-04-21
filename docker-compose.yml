@@ -13,6 +13,7 @@ services:
     volumes:
       - ./recordings:/app/recordings
       - ./pages:/app/pages
+      - ./backend/data/chroma:/app/backend/data/chroma
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:7021/" ]
