@@ -235,9 +235,9 @@
             </div>
 
             <div id="securityAlert"
-              class="hidden mb-3 p-3 rounded-lg bg-red-100 border-2 border-red-500 text-red-800 text-sm font-semibold">
-              <span class="mr-1">⚠️</span>
-              <span id="securityAlertMessage">Security alert: primary speaker changed. Call terminated.</span>
+              class="hidden mb-3 p-3 rounded-lg bg-amber-100 border-2 border-amber-500 text-amber-900 text-sm font-semibold">
+              <span class="mr-1">👥</span>
+              <span id="securityAlertMessage">Another speaker detected.</span>
             </div>
 
             <div id="statusContainer" class="hidden flex-col items-center gap-2 mb-4">
@@ -504,6 +504,7 @@
 
     let ws, micContext, micProc, micSource, audioContext, masterGainNode;
     let audioQueue = [], lastScheduledTime = 0, call_id;
+    let secondaryAlertHideTimer = null;
     let selectedVoice = "Charon", selectedSpeed = 1.05;
     let availableVoices = {}, callTimerInterval = null;
     const MAX_SCHEDULE_LOOKAHEAD = 0.15;
@@ -680,6 +681,7 @@
       const securityAlertEl = document.getElementById("securityAlert");
       const securityAlertMsgEl = document.getElementById("securityAlertMessage");
       if (securityAlertEl) securityAlertEl.classList.add("hidden");
+      if (secondaryAlertHideTimer) { clearTimeout(secondaryAlertHideTimer); secondaryAlertHideTimer = null; }
 
       ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/media-stream-browser");
 
@@ -696,15 +698,25 @@
         try {
           const data = JSON.parse(ev.data);
           if (data.event === "clear") { clearAudioQueue(); log("🔇 Audio queue cleared"); }
-          else if (data.event === "speaker_changed") {
+          else if (data.event === "secondary_speaker_detected") {
             const sim = typeof data.similarity === "number" ? ` (similarity ${data.similarity.toFixed(2)})` : "";
+            const count = typeof data.count === "number" ? ` — x${data.count}` : "";
             if (securityAlertMsgEl) {
-              securityAlertMsgEl.textContent = (data.message || "Primary speaker change detected. Handing off to human agent.") + sim;
+              securityAlertMsgEl.textContent = (data.message || "Another speaker detected.") + sim + count;
             }
             if (securityAlertEl) securityAlertEl.classList.remove("hidden");
-            log("🚨 Security: primary speaker changed — playing handoff message before close");
-            // Do NOT close the socket here — the backend needs to stream the
-            // farewell audio first and will close when playback is done.
+            // Safety timeout: if the primary-restored event never arrives
+            // (e.g. caller goes silent), auto-clear after a while.
+            if (secondaryAlertHideTimer) clearTimeout(secondaryAlertHideTimer);
+            secondaryAlertHideTimer = setTimeout(() => {
+              if (securityAlertEl) securityAlertEl.classList.add("hidden");
+            }, 15000);
+            log(`👥 Secondary speaker detected${sim}`);
+          }
+          else if (data.event === "primary_speaker_restored") {
+            if (secondaryAlertHideTimer) { clearTimeout(secondaryAlertHideTimer); secondaryAlertHideTimer = null; }
+            if (securityAlertEl) securityAlertEl.classList.add("hidden");
+            log("🟢 Primary speaker back");
           }
           else if (data.event === "token_usage") {
             callSessionTokenUsage = data.session_total || data.usage || callSessionTokenUsage;
@@ -736,13 +748,8 @@
 
       ws.addEventListener("close", (ev) => {
         log("WebSocket closed");
-        if (ev && ev.code === 4001) {
-          if (securityAlertMsgEl) {
-            securityAlertMsgEl.textContent = "Security alert: primary speaker changed. Call terminated.";
-          }
-          if (securityAlertEl) securityAlertEl.classList.remove("hidden");
-          log("🚨 Security: call terminated by server (speaker changed)");
-        }
+        if (secondaryAlertHideTimer) { clearTimeout(secondaryAlertHideTimer); secondaryAlertHideTimer = null; }
+        if (securityAlertEl) securityAlertEl.classList.add("hidden");
         endCallUI();
       });
 

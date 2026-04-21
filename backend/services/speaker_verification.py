@@ -3,8 +3,9 @@
 One SpeakerVerifier instance per call. The first ~3 seconds of voiced caller
 audio are enrolled as the reference voiceprint; every ~1.5 s of voiced audio
 thereafter is compared to it via cosine similarity on resemblyzer embeddings.
-A mismatch is only "confirmed" after 2 consecutive windows fall below the
-similarity threshold, to absorb single-window noise.
+Every window whose similarity falls below the threshold is reported as a
+secondary-speaker detection — the call is NOT terminated; the caller receives
+a purely visual notice on the frontend.
 """
 
 from __future__ import annotations
@@ -23,9 +24,8 @@ _ENERGY_RMS_MIN = 300.0  # int16 RMS gate to skip silence from enrollment window
 
 @dataclass
 class SpeakerCheckResult:
-    kind: str  # "enrolled" | "match" | "mismatch"
+    kind: str  # "enrolled" | "match" | "secondary" | "primary_restored"
     similarity: Optional[float]
-    mismatch_confirmed: bool
 
 
 _encoder: Optional[VoiceEncoder] = None
@@ -60,22 +60,18 @@ class SpeakerVerifier:
         enrollment_seconds: float = 3.0,
         window_seconds: float = 1.5,
         similarity_threshold: float = 0.70,
-        consecutive_failures_to_flag: int = 2,
     ):
         self.call_id = call_id
         self.sample_rate = sample_rate
         self.enrollment_samples = int(enrollment_seconds * sample_rate)
         self.window_samples = int(window_seconds * sample_rate)
         self.similarity_threshold = similarity_threshold
-        self.consecutive_failures_to_flag = consecutive_failures_to_flag
 
         self._voiced_buffer = np.empty(0, dtype=np.int16)
         self._reference_embedding: Optional[np.ndarray] = None
         self._enrolled_consumed = 0
-        self._consecutive_below = 0
-        self._mismatch_confirmed = False
         self._check_in_flight = False
-        self._chunks_since_last_log = 0
+        self._secondary_active = False
 
         self._first_audio_at: Optional[float] = None
         self._enrollment_ms: Optional[float] = None
@@ -83,15 +79,16 @@ class SpeakerVerifier:
         self._embed_count = 0
         self._total_add_audio_ms = 0.0
         self._add_audio_count = 0
+        self._secondary_detections = 0
 
     @property
-    def mismatch_confirmed(self) -> bool:
-        return self._mismatch_confirmed
+    def secondary_detections(self) -> int:
+        return self._secondary_detections
 
     def add_audio(self, pcm_bytes: bytes) -> None:
         """Append 16 kHz mono int16 PCM. Silent frames are dropped so the
         enrollment/window thresholds count *voiced* audio only."""
-        if self._mismatch_confirmed or not pcm_bytes:
+        if not pcm_bytes:
             return
         t0 = time.perf_counter()
         arr = np.frombuffer(pcm_bytes, dtype=np.int16)
@@ -109,7 +106,7 @@ class SpeakerVerifier:
     async def maybe_check(self) -> Optional[SpeakerCheckResult]:
         """Run enrollment or a comparison window if enough new voiced audio
         has accumulated. Returns None if nothing was done."""
-        if self._mismatch_confirmed or self._check_in_flight:
+        if self._check_in_flight:
             return None
 
         encoder = await get_encoder()
@@ -138,9 +135,7 @@ class SpeakerVerifier:
                     f"⏱️  [SECURITY TIMING] call={self.call_id} enrollment_embed_ms={embed_ms:.1f} "
                     f"clip_samples={clip.size}"
                 )
-                return SpeakerCheckResult(
-                    kind="enrolled", similarity=None, mismatch_confirmed=False
-                )
+                return SpeakerCheckResult(kind="enrolled", similarity=None)
             finally:
                 self._check_in_flight = False
 
@@ -177,45 +172,30 @@ class SpeakerVerifier:
             )
 
             if similarity < self.similarity_threshold:
-                self._consecutive_below += 1
+                self._secondary_detections += 1
+                self._secondary_active = True
                 print(
                     f"⚠️  [SECURITY] call={self.call_id} similarity={similarity:.3f} "
-                    f"< {self.similarity_threshold} (strike {self._consecutive_below}/"
-                    f"{self.consecutive_failures_to_flag})"
+                    f"< {self.similarity_threshold} — secondary speaker detected "
+                    f"(count={self._secondary_detections})"
                 )
-                if self._consecutive_below >= self.consecutive_failures_to_flag:
-                    self._mismatch_confirmed = True
-                    detection_latency_s = (
-                        time.time() - self._first_audio_at
-                        if self._first_audio_at is not None
-                        else float("nan")
-                    )
-                    print(
-                        f"⏱️  [SECURITY TIMING] call={self.call_id} MISMATCH_CONFIRMED "
-                        f"detection_latency_s={detection_latency_s:.2f} "
-                        f"embeds_run={self._embed_count} "
-                        f"total_embed_ms={self._total_embed_ms:.1f} "
-                        f"enrollment_ms={self._enrollment_ms or 0.0:.1f}"
-                    )
-                    return SpeakerCheckResult(
-                        kind="mismatch",
-                        similarity=similarity,
-                        mismatch_confirmed=True,
-                    )
+                return SpeakerCheckResult(kind="secondary", similarity=similarity)
+
+            if self._secondary_active:
+                self._secondary_active = False
+                print(
+                    f"✅ [SECURITY] call={self.call_id} similarity={similarity:.3f} "
+                    f"— primary speaker restored"
+                )
                 return SpeakerCheckResult(
-                    kind="mismatch",
-                    similarity=similarity,
-                    mismatch_confirmed=False,
+                    kind="primary_restored", similarity=similarity
                 )
 
-            self._consecutive_below = 0
             print(
                 f"✅ [SECURITY] call={self.call_id} similarity={similarity:.3f} "
                 f"(same speaker)"
             )
-            return SpeakerCheckResult(
-                kind="match", similarity=similarity, mismatch_confirmed=False
-            )
+            return SpeakerCheckResult(kind="match", similarity=similarity)
         finally:
             self._check_in_flight = False
 

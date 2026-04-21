@@ -384,99 +384,69 @@ async def _stream_fallback_farewell(websocket: WebSocket) -> bool:
     return True
 
 
-async def _handle_speaker_mismatch(
+async def _notify_secondary_speaker(
     websocket: WebSocket,
-    gemini_client,
     call_id: str | None,
     result: SpeakerCheckResult,
-    farewell_state: dict,
 ) -> None:
-    """Flag the call, play the pre-synthesized TTS farewell, then close the
-    WebSocket with code 4001. Gemini is muted for the duration so the
-    customer hears only the TTS clip — no double-audio from the Live API."""
+    """Record a secondary-speaker detection and push a notice to the frontend.
+    The call continues — this is display-only, no audio interruption or
+    WebSocket close."""
     similarity = result.similarity
-    print(
-        f"🚨 [SECURITY] Primary speaker change detected for call {call_id} "
-        f"(similarity={similarity:.3f})"
-    )
     if call_id:
         call_metadata.setdefault(call_id, {})
-        call_metadata[call_id]["speaker_mismatch_detected"] = True
-        call_metadata[call_id]["speaker_similarity_at_mismatch"] = similarity
+        meta = call_metadata[call_id]
+        meta["speaker_mismatch_detected"] = True
+        meta["speaker_similarity_at_mismatch"] = similarity
+        meta["secondary_speaker_detections"] = (
+            meta.get("secondary_speaker_detections", 0) + 1
+        )
+        detection_count = meta["secondary_speaker_detections"]
+    else:
+        detection_count = 1
+    print(
+        f"👥 [SECURITY] call={call_id} secondary speaker detected "
+        f"(similarity={similarity:.3f}, count={detection_count})"
+    )
     _record_routing_event(
         call_id,
-        "speaker_changed",
-        {"similarity": similarity, "threshold_breached": True},
+        "secondary_speaker_detected",
+        {"similarity": similarity, "count": detection_count},
     )
-
     try:
         await websocket.send_json({
-            "event": "speaker_changed",
-            "message": "Primary speaker change detected. Handing off to human agent.",
+            "event": "secondary_speaker_detected",
+            "message": "Another speaker detected.",
             "similarity": similarity,
-            "severity": "critical",
+            "count": detection_count,
         })
     except Exception as e:
-        print(f"⚠️ Failed to send speaker_changed event: {e}")
+        print(f"⚠️ Failed to send secondary_speaker_detected event: {e}")
 
-    # Activate farewell state: mic stops feeding Gemini, and any Gemini
-    # audio still in flight gets dropped by the receive loop.
-    farewell_state["active"] = True
+
+async def _notify_primary_restored(
+    websocket: WebSocket,
+    call_id: str | None,
+    result: SpeakerCheckResult,
+) -> None:
+    """Tell the frontend the primary speaker is back so the banner clears."""
+    similarity = result.similarity
+    print(
+        f"🟢 [SECURITY] call={call_id} primary speaker restored "
+        f"(similarity={similarity:.3f})"
+    )
+    _record_routing_event(
+        call_id,
+        "primary_speaker_restored",
+        {"similarity": similarity},
+    )
     try:
-        # Flush any agent audio the browser is still playing from the
-        # pre-mismatch turn before the TTS clip.
-        try:
-            await websocket.send_json({"event": "clear"})
-        except Exception as e:
-            print(f"⚠️ [SECURITY] Failed to send clear event: {e}")
-
-        print(f"🔊 [SECURITY] Streaming TTS farewell for call {call_id}")
-        fallback_ok = await _stream_fallback_farewell(websocket)
-        if not fallback_ok:
-            print(f"⚠️ [SECURITY] TTS farewell failed for call {call_id}")
-            try:
-                await websocket.send_json({
-                    "event": "agent_message",
-                    "text": FAREWELL_MESSAGE,
-                })
-            except Exception:
-                pass
-    finally:
-        farewell_state["active"] = False
-
-    # Close order matters: the browser WebSocket 4001 frame is the
-    # user-facing signal the frontend keys off of, and must land before
-    # Gemini's close cascades into task cancellation. Both calls are
-    # shielded so `asyncio.wait(FIRST_COMPLETED)` cancelling monitor_task
-    # cannot eat the close.
-    print(f"🛑 [SECURITY] Closing browser WebSocket (code=4001) for call {call_id}")
-    try:
-        await asyncio.shield(
-            asyncio.wait_for(
-                websocket.close(code=4001, reason="speaker_changed"),
-                timeout=3.0,
-            )
-        )
-        print(f"✅ [SECURITY] Browser WebSocket closed for call {call_id}")
-    except asyncio.CancelledError:
-        raise
-    except asyncio.TimeoutError:
-        print(f"⚠️ [SECURITY] websocket.close() hung — continuing")
+        await websocket.send_json({
+            "event": "primary_speaker_restored",
+            "similarity": similarity,
+        })
     except Exception as e:
-        print(f"⚠️ [SECURITY] websocket.close error: {e}")
-
-    if gemini_client is not None:
-        print(f"🛑 [SECURITY] Closing Gemini session for call {call_id}")
-        try:
-            await asyncio.shield(
-                asyncio.wait_for(gemini_client.close(), timeout=3.0)
-            )
-        except asyncio.CancelledError:
-            raise
-        except asyncio.TimeoutError:
-            print("⚠️ [SECURITY] Gemini close timed out — continuing")
-        except Exception as e:
-            print(f"⚠️ Failed to close Gemini session cleanly: {e}")
+        print(f"⚠️ Failed to send primary_speaker_restored event: {e}")
 
 
 def _record_routing_event(call_id: str | None, event_type: str, payload: dict | None = None) -> None:
@@ -1311,9 +1281,9 @@ async def media_stream_browser(websocket: WebSocket):
                                 func_args = tool_call.get("arguments", {})
 
                                 if func_name == SPEAKER_HANDOFF_TOOL_NAME:
-                                    # Ack only — the TTS farewell is already
-                                    # being played by _handle_speaker_mismatch,
-                                    # so Gemini's side of this flow is inert.
+                                    # Ack only — speaker-change handling is
+                                    # display-only on the frontend; Gemini's
+                                    # side of this flow is inert.
                                     print(
                                         f"🛑 [SECURITY] {SPEAKER_HANDOFF_TOOL_NAME} "
                                         f"invoked by Gemini for call {call_id} (ack only)"
@@ -1462,8 +1432,8 @@ async def media_stream_browser(websocket: WebSocket):
         
         async def speaker_monitor():
             """Periodically run speaker verification off the audio hot path.
-            Exits (and thereby triggers call cleanup) when a mismatch is
-            confirmed."""
+            Emits notices to the frontend on secondary-speaker detection and
+            on primary-speaker restoration. The call is never terminated here."""
             while True:
                 await asyncio.sleep(0.5)
                 if speaker_verifier is None:
@@ -1474,11 +1444,12 @@ async def media_stream_browser(websocket: WebSocket):
                     print(f"❌ [SECURITY] speaker_monitor error: {e}")
                     traceback.print_exc()
                     continue
-                if result is not None and result.mismatch_confirmed:
-                    await _handle_speaker_mismatch(
-                        websocket, gemini_client, call_id, result, farewell_state
-                    )
-                    return
+                if result is None:
+                    continue
+                if result.kind == "secondary":
+                    await _notify_secondary_speaker(websocket, call_id, result)
+                elif result.kind == "primary_restored":
+                    await _notify_primary_restored(websocket, call_id, result)
 
         # Run tasks concurrently
         recv_task = asyncio.create_task(receive_from_browser())
