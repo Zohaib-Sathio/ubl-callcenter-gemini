@@ -234,6 +234,12 @@
               </button>
             </div>
 
+            <div id="securityAlert"
+              class="hidden mb-3 p-3 rounded-lg bg-amber-100 border-2 border-amber-500 text-amber-900 text-sm font-semibold">
+              <span class="mr-1">👥</span>
+              <span id="securityAlertMessage">Another speaker detected.</span>
+            </div>
+
             <div id="statusContainer" class="hidden flex-col items-center gap-2 mb-4">
               <div
                 class="inline-flex items-center gap-2 bg-gradient-to-r from-green-100 to-green-50 border-2 border-green-500 rounded-full px-4 py-2">
@@ -498,6 +504,7 @@
 
     let ws, micContext, micProc, micSource, audioContext, masterGainNode;
     let audioQueue = [], lastScheduledTime = 0, call_id;
+    let secondaryAlertHideTimer = null;
     let selectedVoice = "Charon", selectedSpeed = 1.05;
     let availableVoices = {}, callTimerInterval = null;
     const MAX_SCHEDULE_LOOKAHEAD = 0.15;
@@ -604,6 +611,38 @@
     }
 
     let callSessionTokenUsage = null;
+    let callActive = false;
+
+    function endCallUI({ triggerAnalysis = true } = {}) {
+      if (!callActive) return;
+      callActive = false;
+
+      stopBtn.disabled = true;
+      startBtn.disabled = false;
+      speedSlider.disabled = false;
+      statusContainer.classList.add("hidden");
+      statusContainer.classList.remove("flex");
+
+      clearAudioQueue();
+      if (micProc) {
+        try { micProc.disconnect(); micProc.port.onmessage = null; } catch (e) {}
+        micProc = null;
+      }
+      if (micSource) {
+        try { micSource.disconnect(); } catch (e) {}
+        micSource = null;
+      }
+      if (micContext && micContext.state !== "closed") {
+        try { micContext.close(); } catch (e) {}
+      }
+
+      stopCallTimer();
+      logTokenUsageSummary();
+
+      if (triggerAnalysis && call_id && window.ublCallAnalysis) {
+        window.ublCallAnalysis.startAnalysisCountdown(call_id);
+      }
+    }
 
     startBtn.onclick = async () => {
       startBtn.disabled = true;
@@ -639,12 +678,19 @@
       lowPassFilter.connect(audioContext.destination);
       lastScheduledTime = audioContext.currentTime;
 
+      const securityAlertEl = document.getElementById("securityAlert");
+      const securityAlertMsgEl = document.getElementById("securityAlertMessage");
+      if (securityAlertEl) securityAlertEl.classList.add("hidden");
+      if (secondaryAlertHideTimer) { clearTimeout(secondaryAlertHideTimer); secondaryAlertHideTimer = null; }
+
       ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/media-stream-browser");
 
       ws.addEventListener("open", () => {
         log("WebSocket connected");
         const token = localStorage.getItem(JWT_TOKEN_KEY);
         ws.send(JSON.stringify({ event: "start", start: { streamSid: "browser-stream-" + Math.random().toString(36).slice(2, 8), callSid: "browser-call-" + Math.random().toString(36).slice(2, 8), customParameters: { call_id: call_id, token: token } } }));
+        callActive = true;
+        stopBtn.disabled = false;
         startCallTimer();
       });
 
@@ -652,6 +698,26 @@
         try {
           const data = JSON.parse(ev.data);
           if (data.event === "clear") { clearAudioQueue(); log("🔇 Audio queue cleared"); }
+          else if (data.event === "secondary_speaker_detected") {
+            const sim = typeof data.similarity === "number" ? ` (similarity ${data.similarity.toFixed(2)})` : "";
+            const count = typeof data.count === "number" ? ` — x${data.count}` : "";
+            if (securityAlertMsgEl) {
+              securityAlertMsgEl.textContent = (data.message || "Another speaker detected.") + sim + count;
+            }
+            if (securityAlertEl) securityAlertEl.classList.remove("hidden");
+            // Safety timeout: if the primary-restored event never arrives
+            // (e.g. caller goes silent), auto-clear after a while.
+            if (secondaryAlertHideTimer) clearTimeout(secondaryAlertHideTimer);
+            secondaryAlertHideTimer = setTimeout(() => {
+              if (securityAlertEl) securityAlertEl.classList.add("hidden");
+            }, 15000);
+            log(`👥 Secondary speaker detected${sim}`);
+          }
+          else if (data.event === "primary_speaker_restored") {
+            if (secondaryAlertHideTimer) { clearTimeout(secondaryAlertHideTimer); secondaryAlertHideTimer = null; }
+            if (securityAlertEl) securityAlertEl.classList.add("hidden");
+            log("🟢 Primary speaker back");
+          }
           else if (data.event === "token_usage") {
             callSessionTokenUsage = data.session_total || data.usage || callSessionTokenUsage;
           }
@@ -680,16 +746,17 @@
         } catch (e) { console.error("WebSocket message error", e); }
       });
 
-      ws.addEventListener("close", () => {
+      ws.addEventListener("close", (ev) => {
         log("WebSocket closed");
-        logTokenUsageSummary();
-        statusContainer.classList.add("hidden");
-        statusContainer.classList.remove("flex");
-        speedSlider.disabled = false;
-        stopCallTimer();
+        if (secondaryAlertHideTimer) { clearTimeout(secondaryAlertHideTimer); secondaryAlertHideTimer = null; }
+        if (securityAlertEl) securityAlertEl.classList.add("hidden");
+        endCallUI();
       });
 
-      ws.addEventListener("error", (err) => { log("⚠️ WebSocket error occurred"); });
+      ws.addEventListener("error", (err) => {
+        log("⚠️ WebSocket error occurred");
+        endCallUI();
+      });
 
       // Use 16kHz sample rate to match Gemini's native input format (eliminates server-side resampling)
       micContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: MIC_SAMPLE_RATE });
@@ -773,21 +840,12 @@
     };
 
     stopBtn.onclick = () => {
-      stopBtn.disabled = true;
-      statusContainer.classList.add("hidden");
-      statusContainer.classList.remove("flex");
-      clearAudioQueue();
-      if (micProc) { micProc.disconnect(); micProc.port.onmessage = null; }
-      if (micSource) micSource.disconnect();
-      if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ event: "stop" })); ws.close(); }
-      speedSlider.disabled = false;
-      startBtn.disabled = false;
-      log("Call ended");
-      logTokenUsageSummary();
-      stopCallTimer();
-      if (call_id && window.ublCallAnalysis) {
-        window.ublCallAnalysis.startAnalysisCountdown(call_id);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ event: "stop" }));
+        ws.close();
       }
+      log("Call ended");
+      endCallUI();
     };
 
     document.addEventListener("DOMContentLoaded", async () => {

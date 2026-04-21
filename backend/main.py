@@ -53,6 +53,11 @@ from backend.workflow.registry import (
 )
 from backend.services.rag_tools import search_knowledge_base, prewarm_embeddings
 from backend.services.audio_transcription import transcribe_audio, analyze_call_with_llm
+from backend.services.speaker_verification import (
+    SpeakerVerifier,
+    SpeakerCheckResult,
+    warm_encoder as warm_speaker_encoder,
+)
 from backend.services.gemini_live import (
     GeminiLiveClient,
     GeminiLiveConfig,
@@ -274,6 +279,7 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_prewarm():
     asyncio.create_task(prewarm_embeddings())
+    asyncio.create_task(warm_speaker_encoder())
 
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "ubl-digital-ai-call-center-secret-key-2024")
@@ -307,6 +313,142 @@ RATE = 8000
 call_metadata: dict[str, dict] = {}
 
 
+FAREWELL_MESSAGE = (
+    "We have detected second person with you, thats why we are redirecting "
+    "you to human agent"
+)
+SPEAKER_HANDOFF_TOOL_NAME = "endCallSpeakerChange"
+FAREWELL_FALLBACK_CHUNK_BYTES = 4800  # 100ms @ 24kHz mono 16-bit
+
+_FAREWELL_FALLBACK_PCM: bytes | None = None
+_FAREWELL_FALLBACK_LOCK = asyncio.Lock()
+
+
+async def _get_fallback_farewell_audio() -> bytes | None:
+    """Return cached 24kHz mono 16-bit PCM of the farewell message.
+    Generated on first use via OpenAI TTS so we always have something to play
+    if Gemini skips speaking the security handoff sentence."""
+    global _FAREWELL_FALLBACK_PCM
+    if _FAREWELL_FALLBACK_PCM is not None:
+        return _FAREWELL_FALLBACK_PCM
+    async with _FAREWELL_FALLBACK_LOCK:
+        if _FAREWELL_FALLBACK_PCM is not None:
+            return _FAREWELL_FALLBACK_PCM
+        try:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI()
+            resp = await client.audio.speech.create(
+                model="tts-1",
+                voice="onyx",
+                input=FAREWELL_MESSAGE,
+                response_format="pcm",
+            )
+            pcm = resp.content if hasattr(resp, "content") else await resp.aread()
+            _FAREWELL_FALLBACK_PCM = pcm
+            print(f"🔊 [SECURITY] Cached fallback farewell audio ({len(pcm)} bytes)")
+            return _FAREWELL_FALLBACK_PCM
+        except Exception as e:
+            print(f"⚠️ [SECURITY] Failed to synthesize fallback farewell: {e}")
+            return None
+
+
+async def _stream_fallback_farewell(websocket: WebSocket) -> bool:
+    """Play the pre-rendered farewell clip to the browser as 'media' events.
+    Returns True if any audio was streamed."""
+    pcm = await _get_fallback_farewell_audio()
+    if not pcm:
+        return False
+    streamed_bytes = 0
+    for i in range(0, len(pcm), FAREWELL_FALLBACK_CHUNK_BYTES):
+        chunk = pcm[i:i + FAREWELL_FALLBACK_CHUNK_BYTES]
+        try:
+            await websocket.send_json({
+                "event": "media",
+                "media": {
+                    "payload": base64.b64encode(chunk).decode("utf-8"),
+                    "format": "raw_pcm",
+                    "sampleRate": 24000,
+                    "channels": 1,
+                    "bitDepth": 16,
+                },
+            })
+            streamed_bytes += len(chunk)
+        except Exception as e:
+            print(f"⚠️ [SECURITY] Fallback stream interrupted: {e}")
+            break
+    if streamed_bytes == 0:
+        return False
+    # Let the browser finish playback before the socket closes.
+    duration_s = streamed_bytes / (24000 * 2)
+    await asyncio.sleep(duration_s + 0.5)
+    return True
+
+
+async def _notify_secondary_speaker(
+    websocket: WebSocket,
+    call_id: str | None,
+    result: SpeakerCheckResult,
+) -> None:
+    """Record a secondary-speaker detection and push a notice to the frontend.
+    The call continues — this is display-only, no audio interruption or
+    WebSocket close."""
+    similarity = result.similarity
+    if call_id:
+        call_metadata.setdefault(call_id, {})
+        meta = call_metadata[call_id]
+        meta["speaker_mismatch_detected"] = True
+        meta["speaker_similarity_at_mismatch"] = similarity
+        meta["secondary_speaker_detections"] = (
+            meta.get("secondary_speaker_detections", 0) + 1
+        )
+        detection_count = meta["secondary_speaker_detections"]
+    else:
+        detection_count = 1
+    print(
+        f"👥 [SECURITY] call={call_id} secondary speaker detected "
+        f"(similarity={similarity:.3f}, count={detection_count})"
+    )
+    _record_routing_event(
+        call_id,
+        "secondary_speaker_detected",
+        {"similarity": similarity, "count": detection_count},
+    )
+    try:
+        await websocket.send_json({
+            "event": "secondary_speaker_detected",
+            "message": "Another speaker detected.",
+            "similarity": similarity,
+            "count": detection_count,
+        })
+    except Exception as e:
+        print(f"⚠️ Failed to send secondary_speaker_detected event: {e}")
+
+
+async def _notify_primary_restored(
+    websocket: WebSocket,
+    call_id: str | None,
+    result: SpeakerCheckResult,
+) -> None:
+    """Tell the frontend the primary speaker is back so the banner clears."""
+    similarity = result.similarity
+    print(
+        f"🟢 [SECURITY] call={call_id} primary speaker restored "
+        f"(similarity={similarity:.3f})"
+    )
+    _record_routing_event(
+        call_id,
+        "primary_speaker_restored",
+        {"similarity": similarity},
+    )
+    try:
+        await websocket.send_json({
+            "event": "primary_speaker_restored",
+            "similarity": similarity,
+        })
+    except Exception as e:
+        print(f"⚠️ Failed to send primary_speaker_restored event: {e}")
+
+
 def _record_routing_event(call_id: str | None, event_type: str, payload: dict | None = None) -> None:
     if not call_id:
         return
@@ -336,6 +478,8 @@ def _init_conversation_state(call_id: str) -> None:
         "card_details_verified": False,
         "card_activated": False,
     })
+    call_metadata[call_id].setdefault("speaker_mismatch_detected", False)
+    call_metadata[call_id].setdefault("speaker_similarity_at_mismatch", None)
 
 
 def _log_conversation_state(call_id: str, operation: str) -> None:
@@ -577,6 +721,11 @@ def generate_silence(duration_sec, sample_rate=8000):
 
 async def execute_function_call(func_name: str, func_args: dict, call_id: str | None = None) -> dict:
     try:
+        if func_name == SPEAKER_HANDOFF_TOOL_NAME:
+            # Normally short-circuited in receive_from_gemini_and_forward;
+            # this fallback just acks without routing through workflow gating.
+            return {"acknowledged": True}
+
         if func_name == WORKFLOW_SELECTOR_TOOL_NAME:
             workflow_id = func_args.get("workflowId", "")
             reason = func_args.get("reason", "")
@@ -911,6 +1060,8 @@ async def media_stream_browser(websocket: WebSocket):
     user_pcm_buffer = io.BytesIO()
     agent_pcm_buffer = io.BytesIO()
 
+    speaker_verifier: SpeakerVerifier | None = None
+
     function_call_completed_time = None
     FUNCTION_CALL_GRACE_PERIOD = 3.0
 
@@ -921,6 +1072,8 @@ async def media_stream_browser(websocket: WebSocket):
     _audio_sent_before_tool = False  # True if audio was already forwarded before a tool call in this turn
     _suppress_post_tool_audio = False  # True = drop all post-tool audio until turn_complete
     _turn_audio_bytes = 0  # Track audio bytes sent to browser in current turn
+
+    farewell_state: dict = {"active": False}
 
     token_tracker: TokenTracker | None = None
     
@@ -951,6 +1104,8 @@ async def media_stream_browser(websocket: WebSocket):
         
         call_id = start_data["start"]["customParameters"].get("call_id")
         stream_sid = start_data["start"].get("streamSid", "browser-stream")
+        speaker_verifier = SpeakerVerifier(call_id=call_id)
+        print(f"🔒 [SECURITY] SpeakerVerifier initialized for call {call_id}")
         meta = call_metadata.get(call_id, {})
         
         # Build Gemini configuration
@@ -1024,8 +1179,20 @@ async def media_stream_browser(websocket: WebSocket):
                             # This eliminates resampling overhead for lower latency
                             pcm_16khz = convert_browser_to_gemini(pcm_data, input_rate=16000)
 
-                            # Send to Gemini immediately
-                            await gemini_client.send_audio(pcm_16khz)
+                            # Once the security handoff has fired, stop feeding
+                            # mic audio to Gemini so it focuses on the
+                            # directive instead of responding to the impostor.
+                            if not farewell_state["active"]:
+                                await gemini_client.send_audio(pcm_16khz)
+
+                            # Append to speaker-verification buffer (cheap — just
+                            # a numpy concat). The actual embedding + comparison
+                            # runs in the separate speaker_monitor task so it
+                            # never blocks audio forwarding to Gemini.
+                            try:
+                                speaker_verifier.add_audio(pcm_data)
+                            except Exception as sv_err:
+                                print(f"❌ [SECURITY] add_audio error: {sv_err}")
                         
                         elif data.get("event") == "stop":
                             print(f"🛑 Browser sent stop event for call {call_id}")
@@ -1084,7 +1251,12 @@ async def media_stream_browser(websocket: WebSocket):
                             if not _tool_call_received_at:
                                 _audio_sent_before_tool = True
 
-                            # Drop audio chunks when suppressing post-tool duplicates
+                            # Drop audio while the security handoff is active —
+                            # only the TTS farewell is allowed to play during
+                            # that window.
+                            if farewell_state["active"]:
+                                continue
+
                             if _suppress_post_tool_audio:
                                 continue
 
@@ -1107,11 +1279,32 @@ async def media_stream_browser(websocket: WebSocket):
                                 func_name = tool_call.get("name")
                                 func_id = tool_call.get("id")
                                 func_args = tool_call.get("arguments", {})
-                                
+
+                                if func_name == SPEAKER_HANDOFF_TOOL_NAME:
+                                    # Ack only — speaker-change handling is
+                                    # display-only on the frontend; Gemini's
+                                    # side of this flow is inert.
+                                    print(
+                                        f"🛑 [SECURITY] {SPEAKER_HANDOFF_TOOL_NAME} "
+                                        f"invoked by Gemini for call {call_id} (ack only)"
+                                    )
+                                    try:
+                                        await gemini_client.send_tool_response([{
+                                            "id": func_id,
+                                            "name": func_name,
+                                            "response": {"acknowledged": True},
+                                        }])
+                                    except Exception as ack_err:
+                                        print(
+                                            f"⚠️ [SECURITY] Failed to ack "
+                                            f"{SPEAKER_HANDOFF_TOOL_NAME}: {ack_err}"
+                                        )
+                                    continue
+
                                 _tool_call_received_at = time.time()
                                 _tool_func_name = func_name
                                 _first_audio_after_tool = True
-                                
+
                                 print(f"🔧 Function call: {func_name} with args: {func_args}")
                                 
                                 exec_start = time.time()
@@ -1176,7 +1369,13 @@ async def media_stream_browser(websocket: WebSocket):
                                 function_call_completed_time = None
 
                             # Detect empty/silent turns and nudge Gemini to retry
-                            if _turn_audio_bytes == 0 and not _suppress_post_tool_audio:
+                            # (skip while the TTS farewell is playing — Gemini
+                            # is intentionally muted in that window).
+                            if (
+                                _turn_audio_bytes == 0
+                                and not _suppress_post_tool_audio
+                                and not farewell_state["active"]
+                            ):
                                 print(f"⚠️ Empty audio turn detected — nudging Gemini to respond")
                                 await gemini_client.send_text(
                                     "You did not produce any audio response. "
@@ -1231,22 +1430,46 @@ async def media_stream_browser(websocket: WebSocket):
                 except:
                     pass
         
-        # Run both tasks concurrently
+        async def speaker_monitor():
+            """Periodically run speaker verification off the audio hot path.
+            Emits notices to the frontend on secondary-speaker detection and
+            on primary-speaker restoration. The call is never terminated here."""
+            while True:
+                await asyncio.sleep(0.5)
+                if speaker_verifier is None:
+                    continue
+                try:
+                    result = await speaker_verifier.maybe_check()
+                except Exception as e:
+                    print(f"❌ [SECURITY] speaker_monitor error: {e}")
+                    traceback.print_exc()
+                    continue
+                if result is None:
+                    continue
+                if result.kind == "secondary":
+                    await _notify_secondary_speaker(websocket, call_id, result)
+                elif result.kind == "primary_restored":
+                    await _notify_primary_restored(websocket, call_id, result)
+
+        # Run tasks concurrently
         recv_task = asyncio.create_task(receive_from_browser())
         send_task = asyncio.create_task(receive_from_gemini_and_forward())
-        
+        monitor_task = asyncio.create_task(speaker_monitor())
+
         try:
             done, pending = await asyncio.wait(
-                [recv_task, send_task],
+                [recv_task, send_task, monitor_task],
                 return_when=asyncio.FIRST_COMPLETED
             )
-            
+
             for task in done:
                 if task == recv_task:
                     print(f"🔚 Browser receive task completed for call {call_id}")
                 elif task == send_task:
                     print(f"🔚 Gemini send task completed for call {call_id}")
-                
+                elif task == monitor_task:
+                    print(f"🔚 Speaker monitor task completed for call {call_id}")
+
                 if task.exception():
                     print(f"❌ Task exception: {task.exception()}")
             
@@ -1318,15 +1541,19 @@ async def media_stream_browser(websocket: WebSocket):
                     f"({ts['utilization_pct']}% utilization)"
                 )
 
+            call_meta_snapshot = call_metadata.get(call_id, {})
             transcripts_output = {
                 "call_id": call_id,
                 "user_transcript": user_transcript,
                 "agent_transcript": agent_transcript,
-                "conversation_summary": call_metadata.get(call_id, {}).get("conversation_summary", ""),
-                "topics_discussed": call_metadata.get(call_id, {}).get("conversation_memory", []),
-                "pending_questions": call_metadata.get(call_id, {}).get("question_queue", []),
-                "answered_questions": call_metadata.get(call_id, {}).get("answered_questions", []),
+                "conversation_summary": call_meta_snapshot.get("conversation_summary", ""),
+                "topics_discussed": call_meta_snapshot.get("conversation_memory", []),
+                "pending_questions": call_meta_snapshot.get("question_queue", []),
+                "answered_questions": call_meta_snapshot.get("answered_questions", []),
                 "token_usage": token_summary,
+                "speaker_mismatch_detected": call_meta_snapshot.get("speaker_mismatch_detected", False),
+                "speaker_similarity_at_mismatch": call_meta_snapshot.get("speaker_similarity_at_mismatch"),
+                "routing_events": call_meta_snapshot.get("routing_events", []),
             }
 
             print(f"📝 Transcripts saved for call {call_id}")
