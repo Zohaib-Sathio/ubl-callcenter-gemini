@@ -1,0 +1,53 @@
+[Unit]
+Description=UBL Call-Center Gemini Voice Agent (browser WebSocket + SIP AudioSocket bridge)
+Documentation=file:///home/aivoice/ubl-callcenter-gemini/deploy/backend_service/INSTALL.md
+After=network-online.target
+Wants=network-online.target
+# Note: we deliberately do NOT hard-depend on asterisk.service.
+# The backend listens on :6090 for AudioSocket regardless of whether
+# Asterisk is up; Asterisk just won't have anything to bridge to yet
+# if the backend is down. Decoupling the two services makes each
+# independently restartable.
+
+[Service]
+Type=simple
+User=aivoice
+Group=aivoice
+WorkingDirectory=/home/aivoice/ubl-callcenter-gemini
+
+# Load environment variables (GOOGLE_API_KEY, JWT_SECRET_KEY, etc.) from the
+# project's .env. The leading `-` means "don't fail if the file is missing"
+# (code still calls load_dotenv() internally as a fallback).
+EnvironmentFile=-/home/aivoice/ubl-callcenter-gemini/.env
+
+# Absolute path to the venv's python so PATH is irrelevant.
+ExecStart=/home/aivoice/ubl-callcenter-gemini/.venv/bin/python -m backend.main
+
+# Restart policy:
+#   on-failure        = auto-restart if process exits non-zero or is killed
+#   RestartSec=10     = wait 10s before restart (don't hammer on loop)
+#   StartLimitBurst=5 = max 5 restarts within StartLimitIntervalSec seconds
+#   StartLimitInt...  = window for the burst count
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Graceful shutdown: FastAPI shutdown hooks need time to close the
+# AudioSocket listener, cancel in-flight SIP calls, flush recordings,
+# and close Gemini sessions. 30s is generous; usually < 5s.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# File-descriptor ceiling for many concurrent calls (each call ~= 3-4 FDs:
+# TCP to Asterisk, WebSocket to Gemini, two recording file handles).
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Send stdout/stderr to journald; view with `journalctl -u ubl-callcenter -f`
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ubl-callcenter
+
+[Install]
+WantedBy=multi-user.target

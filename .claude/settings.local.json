@@ -4,7 +4,8 @@
       "Bash(python:*)",
       "Bash(pip index:*)",
       "Bash(pip install:*)",
-      "Bash(find . -name \"*.py\" -type f ! -path \"./.git/*\" -exec basename {} \\\\;)"
+      "Bash(find . -name \"*.py\" -type f ! -path \"./.git/*\" -exec basename {} \\\\;)",
+      "Bash(bash -n \"/c/Users/zohai/Desktop/Bits Collision/ubl-callcenter-gemini/deploy/sip/firewalld/add-sip-rules.sh\")"
     ]
   }
 }
