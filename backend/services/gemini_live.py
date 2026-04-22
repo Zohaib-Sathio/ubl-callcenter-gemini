@@ -217,14 +217,14 @@ class GeminiLiveClient:
         config["realtime_input_config"] = {
             "automatic_activity_detection": {
                 "disabled": False,
-                "start_of_speech_sensitivity": types.StartSensitivity.START_SENSITIVITY_HIGH,
+                "start_of_speech_sensitivity": types.StartSensitivity.START_SENSITIVITY_MEDIUM,
                 "end_of_speech_sensitivity": types.EndSensitivity.END_SENSITIVITY_LOW,
                 "prefix_padding_ms": 20,
                 "silence_duration_ms": 200,
             }
         }
 
-        print(f"🎙️ VAD Settings: prefix_padding=20ms, silence_duration=400ms, start_sensitivity=HIGH, temp={self.config.temperature}")
+        print(f"🎙️ VAD Settings: prefix_padding=20ms, silence_duration=400ms, start_sensitivity=MEDIUM, temp={self.config.temperature}")
         
         # Connect to Live API - this returns an async context manager
         self._session_context = self.client.aio.live.connect(
