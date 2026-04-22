@@ -466,10 +466,46 @@ async def handle_call(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
         print(f"🔚 [SIP] Call ended: {call_id or asterisk_uuid or peer}")
 
 
-async def main() -> None:
-    server = await asyncio.start_server(handle_call, SIP_SERVER_HOST, SIP_SERVER_PORT)
+def _on_task_done(t: asyncio.Task, task_set: set[asyncio.Task] | None) -> None:
+    if task_set is not None:
+        task_set.discard(t)
+    if t.cancelled():
+        return
+    exc = t.exception()
+    if exc:
+        print(f"❌ [SIP] handle_call task raised: {exc!r}")
+
+
+async def start_audiosocket_server(
+    task_set: set[asyncio.Task] | None = None,
+) -> asyncio.Server:
+    """Start the AudioSocket TCP listener and return the asyncio.Server.
+
+    If `task_set` is provided, each spawned `handle_call` task is registered
+    in it so a parent (e.g. FastAPI shutdown hook) can cancel in-flight calls
+    during graceful shutdown. If None, tasks run fire-and-forget but their
+    exceptions still surface via the done_callback.
+    """
+    def _spawn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        t = asyncio.create_task(handle_call(reader, writer))
+        if task_set is not None:
+            task_set.add(t)
+        t.add_done_callback(lambda _t: _on_task_done(_t, task_set))
+
+    server = await asyncio.start_server(_spawn, SIP_SERVER_HOST, SIP_SERVER_PORT)
     addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
     print(f"🎧 [SIP] AudioSocket server listening on {addrs}")
+    return server
+
+
+async def main() -> None:
+    """Standalone entrypoint — `python -m backend.sip_server`.
+
+    In production the AudioSocket listener is launched by backend.main's
+    FastAPI startup hook (single-process deployment). This entrypoint is
+    retained for local/isolated testing without running the full FastAPI app.
+    """
+    server = await start_audiosocket_server()
     async with server:
         await server.serve_forever()
 

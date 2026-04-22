@@ -282,6 +282,31 @@ async def startup_prewarm():
     asyncio.create_task(warm_speaker_encoder())
 
 
+# Tracks in-flight AudioSocket call handlers so shutdown can cancel them cleanly.
+_sip_handlers: set[asyncio.Task] = set()
+
+
+@app.on_event("startup")
+async def start_sip_bridge():
+    # Lazy import: backend.sip_server itself imports from backend.main. By the
+    # time this hook fires, main.py is fully loaded in sys.modules, so the
+    # inner import resolves without circular-import drama.
+    from backend.sip_server import start_audiosocket_server
+    app.state.sip_server = await start_audiosocket_server(_sip_handlers)
+
+
+@app.on_event("shutdown")
+async def stop_sip_bridge():
+    srv = getattr(app.state, "sip_server", None)
+    if srv:
+        srv.close()
+        await srv.wait_closed()
+    for t in list(_sip_handlers):
+        t.cancel()
+    if _sip_handlers:
+        await asyncio.wait(_sip_handlers, timeout=10.0)
+
+
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "ubl-digital-ai-call-center-secret-key-2024")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
