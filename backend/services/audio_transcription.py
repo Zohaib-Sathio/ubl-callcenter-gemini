@@ -14,12 +14,34 @@ load_dotenv(override=True)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-async def transcribe_audio(file_path: str):
+async def transcribe_audio(file_path: str, language: str | None = None):
+    """
+    Transcribe a call recording.
+
+    Whisper auto-detects language by default, but for short Urdu clips it frequently
+    flips to Hindi (same phonetics, larger training share). Passing an explicit ISO
+    language code ("ur", "en", "ps", "sd", "pa") locks Whisper to that language and
+    eliminates the Hindi contamination that the UAT client reported.
+
+    Default is "ur" because the overwhelming majority of UBL call-center traffic is
+    Urdu. Callers handling multilingual or English-dominant sessions should pass
+    language explicitly.
+    """
+    resolved_language = language or os.getenv("WHISPER_LANGUAGE", "ur")
+
     with open(file_path, "rb") as audio_file:
         transcription = await client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
-            prompt="The conversation may be in Urdu, English, Arabic, Sindhi, Punjabi, Pashto, or Siraiki. Transcribe accurately in the same language without translating. Do not transcribe in Hindi. For Arabic, maintain proper RTL text formatting. For Sindhi, Punjabi, Pashto, and Siraiki use the script or Roman form as spoken."
+            language=resolved_language,
+            prompt=(
+                "This is a UBL Pakistan call-center recording. The conversation is in "
+                "Urdu, English, Sindhi, Punjabi, Pashto, or Siraiki — NOT Hindi. "
+                "Transcribe in the same language as spoken without translating. "
+                "Proper nouns are Pakistani: Muhammad, Ahmed, Ayesha, Fatima, Khan, Malik, Sheikh. "
+                "Banking terms may appear: CNIC, TPIN, UBL, debit card, expiry, balance. "
+                "Digits should be transcribed as numerals, not words."
+            )
         )
     return transcription.text
 
