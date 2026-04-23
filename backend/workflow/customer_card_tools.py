@@ -170,11 +170,12 @@ async def verify_tpin(cnic: str, tpin: str) -> dict:
             print(f"⚠️ verify_tpin: Max attempts exceeded @ {time.time()}")
             return {
                 "success": False,
-                "error": "Maximum verification attempts exceeded",
+                "error": "Maximum TPIN verification attempts exceeded",
+                "failed_step": "tpin",
                 "transfer_to_agent": True,
                 "attempts": attempts,
                 "max_attempts": max_attempts,
-                "message": "Maximum TPIN verification attempts exceeded. Transferring to human agent for security."
+                "message": "Maximum TPIN verification attempts exceeded (this is the 4-digit telephone PIN step). Transferring to human agent for security."
             }
 
         if _normalize_digits(tpin) == customer_data["tpin"]:
@@ -183,6 +184,7 @@ async def verify_tpin(cnic: str, tpin: str) -> dict:
             return {
                 "success": True,
                 "tpin_verified": True,
+                "failed_step": None,
                 "attempts": attempts,
                 "max_attempts": max_attempts,
                 "message": "TPIN verified successfully."
@@ -193,11 +195,17 @@ async def verify_tpin(cnic: str, tpin: str) -> dict:
             return {
                 "success": False,
                 "error": "Incorrect TPIN",
+                "failed_step": "tpin",
                 "tpin_verified": False,
                 "attempts": attempts,
                 "max_attempts": max_attempts,
                 "remaining_attempts": remaining_attempts,
-                "message": f"Incorrect TPIN. You have {remaining_attempts} attempt(s) remaining."
+                "message": (
+                    f"TPIN step failed — the 4-digit telephone PIN does not match. "
+                    f"This is the TPIN step (NOT the debit card last-4 step). "
+                    f"Ask the customer to read their 4-digit TPIN again, digit by digit. "
+                    f"{remaining_attempts} attempt(s) remaining."
+                )
             }
         
     except Exception as e:
@@ -229,11 +237,12 @@ async def verify_card_details(cnic: str, last_four_digits: str, expiry_date: str
             print(f"⚠️ verify_card_details: Max attempts exceeded @ {time.time()}")
             return {
                 "success": False,
-                "error": "Maximum verification attempts exceeded",
+                "error": "Maximum card-detail verification attempts exceeded",
+                "failed_step": "card_details",
                 "transfer_to_agent": True,
                 "attempts": attempts,
                 "max_attempts": max_attempts,
-                "message": "Maximum card verification attempts exceeded. Transferring to human agent."
+                "message": "Maximum card-details verification attempts exceeded (this is the card last-4 + expiry step, not TPIN). Transferring to human agent."
             }
         
         card_data = customer_data["debit_card"]
@@ -270,12 +279,18 @@ async def verify_card_details(cnic: str, last_four_digits: str, expiry_date: str
             print(f"⚠️ verify_card_details: Verification failed - {', '.join(error_detail)} @ {time.time()}")
             return {
                 "success": False,
-                "error": f"Card verification failed: {', '.join(error_detail)}",
+                "error": f"Card-details verification failed: {', '.join(error_detail)}",
+                "failed_step": "card_details",
                 "card_verified": False,
                 "attempts": attempts,
                 "max_attempts": max_attempts,
                 "remaining_attempts": remaining_attempts,
-                "message": f"Card details incorrect ({', '.join(error_detail)}). You have {remaining_attempts} attempt(s) remaining."
+                "message": (
+                    f"Card-details step failed — the last four digits or expiry date do not match our records "
+                    f"({', '.join(error_detail)}). This is the card verification step, NOT TPIN. "
+                    f"Ask the customer to read the last 4 digits of their card and the expiry date again, clearly. "
+                    f"{remaining_attempts} attempt(s) remaining."
+                )
             }
         
     except Exception as e:

@@ -214,17 +214,28 @@ class GeminiLiveClient:
 
         # Add VAD (Voice Activity Detection) settings
         # Using official Gemini API syntax from: https://ai.google.dev/gemini-api/docs/live-guide
+        # LOW sensitivity = bot is less eager to declare speech start/end, which helps in
+        # noisy environments (family nearby, TV, street) that are common for Pakistani callers.
+        # silence_duration=600ms accommodates natural Urdu/Sindhi/Pashto pauses between words
+        # or while the caller looks up their CNIC/card — 200ms was cutting speakers off mid-digit.
+        vad_settings = {
+            "disabled": False,
+            "start_of_speech_sensitivity": types.StartSensitivity.START_SENSITIVITY_LOW,
+            "end_of_speech_sensitivity": types.EndSensitivity.END_SENSITIVITY_LOW,
+            "prefix_padding_ms": 100,
+            "silence_duration_ms": 600,
+        }
         config["realtime_input_config"] = {
-            "automatic_activity_detection": {
-                "disabled": False,
-                "start_of_speech_sensitivity": types.StartSensitivity.START_SENSITIVITY_LOW,
-                "end_of_speech_sensitivity": types.EndSensitivity.END_SENSITIVITY_LOW,
-                "prefix_padding_ms": 20,
-                "silence_duration_ms": 200,
-            }
+            "automatic_activity_detection": vad_settings
         }
 
-        print(f"🎙️ VAD Settings: prefix_padding=20ms, silence_duration=400ms, start_sensitivity=MEDIUM, temp={self.config.temperature}")
+        print(
+            f"🎙️ VAD Settings: prefix_padding={vad_settings['prefix_padding_ms']}ms, "
+            f"silence_duration={vad_settings['silence_duration_ms']}ms, "
+            f"start_sensitivity={vad_settings['start_of_speech_sensitivity'].name}, "
+            f"end_sensitivity={vad_settings['end_of_speech_sensitivity'].name}, "
+            f"temp={self.config.temperature}"
+        )
         
         # Connect to Live API - this returns an async context manager
         self._session_context = self.client.aio.live.connect(
