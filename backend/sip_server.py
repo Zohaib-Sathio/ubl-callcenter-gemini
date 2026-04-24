@@ -173,6 +173,7 @@ async def handle_call(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 
     user_pcm_buffer = io.BytesIO()    # caller audio, 8 kHz
     agent_pcm_buffer = io.BytesIO()   # Gemini output, 24 kHz
+    agent_pcm_8k_buffer = io.BytesIO()  # what we actually send to Asterisk after 24k->8k resample
 
     up_state = None    # 8 kHz -> 16 kHz resample state (per call)
     down_state = None  # 24 kHz -> 8 kHz resample state (per call)
@@ -184,6 +185,7 @@ async def handle_call(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
         if not pcm_24khz:
             return
         pcm_8khz, down_state = audioop.ratecv(pcm_24khz, 2, 1, 24000, 8000, down_state)
+        agent_pcm_8k_buffer.write(pcm_8khz)
         for i in range(0, len(pcm_8khz), ASTERISK_FRAME_BYTES):
             chunk = pcm_8khz[i:i + ASTERISK_FRAME_BYTES]
             if not chunk:
@@ -415,6 +417,8 @@ async def handle_call(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                 agent_path = str(AGENT_AUDIO_DIR / f"{call_id}_agent.wav")
                 _save_wav(user_path, user_pcm_buffer.getvalue(), 8000)
                 _save_wav(agent_path, agent_pcm_buffer.getvalue(), 24000)
+                agent_8k_path = str(AGENT_AUDIO_DIR / f"{call_id}_agent_8k.wav")
+                _save_wav(agent_8k_path, agent_pcm_8k_buffer.getvalue(), 8000)
                 print(f"💾 [SIP] Saved recordings for call {call_id}")
 
                 try:
