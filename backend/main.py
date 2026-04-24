@@ -910,6 +910,13 @@ async def execute_function_call(func_name: str, func_args: dict, call_id: str | 
                 vers["cnic_verified"] = True
                 vers["verified_cnic"] = func_args.get("cnic", "")
                 print(f"✅ [VERIFY STATE] call={call_id} cnic_verified=True cnic={vers['verified_cnic']}")
+                if active_workflow == "balance_inquiry":
+                    customer_name = (result.get("customer") or {}).get("full_name", "customer")
+                    result["message"] = (
+                        f"CNIC verified successfully for {customer_name} in the balance inquiry flow. "
+                        "NEXT STEP: ask the customer for their 4-digit TPIN and then call verifyTpin. "
+                        "DO NOT ask about physical debit card custody — physical card custody is ONLY part of the card activation flow, not balance inquiry."
+                    )
 
         elif func_name == "confirmPhysicalCustody":
             has_card_str = str(func_args.get("hasCard", "false")).lower()

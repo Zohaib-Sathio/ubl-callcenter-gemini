@@ -61,12 +61,19 @@ class SpeakerVerifier:
         enrollment_seconds: float = 3.0,
         window_seconds: float = 1.5,
         similarity_threshold: float = 0.70,
+        consecutive_below_to_flag: int = 2,
     ):
         self.call_id = call_id
         self.sample_rate = sample_rate
         self.enrollment_samples = int(enrollment_seconds * sample_rate)
         self.window_samples = int(window_seconds * sample_rate)
         self.similarity_threshold = similarity_threshold
+        # Require N consecutive below-threshold windows before flagging a
+        # secondary speaker. Short acoustic dips (language switch, cough,
+        # phone-handling noise) produce one-off low-similarity windows that
+        # rebound immediately; requiring sustained drift cuts false positives
+        # without giving up on real second-speaker detection.
+        self.consecutive_below_to_flag = max(1, consecutive_below_to_flag)
 
         # Voiced audio waiting to be embedded. Kept as a list of chunks so
         # add_audio is O(1) — we only concatenate the exact slice we need
@@ -78,6 +85,7 @@ class SpeakerVerifier:
         self._reference_embedding: Optional[np.ndarray] = None
         self._check_in_flight = False
         self._secondary_active = False
+        self._consecutive_below = 0
 
         self._first_audio_at: Optional[float] = None
         self._enrollment_ms: Optional[float] = None
@@ -196,14 +204,26 @@ class SpeakerVerifier:
             )
 
             if similarity < self.similarity_threshold:
+                self._consecutive_below += 1
+                if self._consecutive_below < self.consecutive_below_to_flag:
+                    print(
+                        f"ℹ️  [SECURITY] call={self.call_id} similarity={similarity:.3f} "
+                        f"< {self.similarity_threshold} — below threshold "
+                        f"(consecutive={self._consecutive_below}/"
+                        f"{self.consecutive_below_to_flag}, not flagging yet)"
+                    )
+                    return SpeakerCheckResult(kind="match", similarity=similarity)
                 self._secondary_detections += 1
                 self._secondary_active = True
                 print(
                     f"⚠️  [SECURITY] call={self.call_id} similarity={similarity:.3f} "
                     f"< {self.similarity_threshold} — secondary speaker detected "
-                    f"(count={self._secondary_detections})"
+                    f"(count={self._secondary_detections}, "
+                    f"consecutive_below={self._consecutive_below})"
                 )
                 return SpeakerCheckResult(kind="secondary", similarity=similarity)
+
+            self._consecutive_below = 0
 
             if self._secondary_active:
                 self._secondary_active = False
