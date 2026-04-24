@@ -75,3 +75,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Deployment archives (too large for git)
+deploy/*.zip
+deploy/sip-*.zip
