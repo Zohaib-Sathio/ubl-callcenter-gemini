@@ -760,7 +760,20 @@
 
       // Use 16kHz sample rate to match Gemini's native input format (eliminates server-side resampling)
       micContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: MIC_SAMPLE_RATE });
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { noiseSuppression: true, echoCancellation: true, sampleRate: MIC_SAMPLE_RATE } });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          noiseSuppression: true,
+          echoCancellation: true,
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: MIC_SAMPLE_RATE,
+          googHighpassFilter: true,
+          googTypingNoiseDetection: true,
+          googNoiseSuppression2: true,
+          googEchoCancellation2: true,
+          googAutoGainControl2: true,
+        }
+      });
       micSource = micContext.createMediaStreamSource(stream);
 
       const workletCode = `class AudioProcessor extends AudioWorkletProcessor {
