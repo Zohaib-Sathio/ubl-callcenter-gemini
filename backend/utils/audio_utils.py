@@ -11,7 +11,8 @@ Browser typically sends:
 
 import audioop
 import struct
-from typing import Tuple
+from collections import deque
+from typing import Optional, Tuple
 
 
 # Audio conversion states for continuous streaming (reduces glitches)
@@ -140,6 +141,95 @@ def get_audio_duration_ms(pcm_data: bytes, sample_rate: int, sample_width: int =
     """
     num_samples = len(pcm_data) // sample_width
     return (num_samples / sample_rate) * 1000
+
+
+class AdaptivePrimarySpeakerGate:
+    """RMS noise gate that auto-calibrates to the loudest recurring voice in a call.
+
+    The threshold is a fraction of the rolling p90 of recent voiced-frame RMS,
+    so it adapts to mic gain and ambient noise instead of needing a hard-coded
+    value per deployment. Frames below threshold are zeroed (preserving stream
+    timing so Gemini's VAD still sees the gap as silence) rather than dropped.
+    A short open-tail keeps the gate open across phoneme-level dips so we don't
+    chop syllables mid-word.
+
+    One instance per call. Not thread-safe; call from a single asyncio task.
+    """
+
+    _ABS_SILENCE_FLOOR = 150       # int16 RMS below this never counts as voice
+    _HISTORY_FRAMES = 200          # ~4-8 s of history at typical 20-40 ms frames
+    _MIN_HISTORY_FRAMES = 25       # don't trust the baseline until we have this many
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        gate_ratio: float = 0.30,
+        open_tail_ms: int = 200,
+        call_id: Optional[str] = None,
+    ):
+        self.sample_rate = sample_rate
+        self.gate_ratio = gate_ratio
+        self.open_tail_samples = int((open_tail_ms / 1000) * sample_rate)
+        self.call_id = call_id
+        self._voiced_rms: deque[int] = deque(maxlen=self._HISTORY_FRAMES)
+        self._open_tail_remaining = 0
+        self._frames_passed = 0
+        self._frames_gated = 0
+        self._last_log_at_frames = 0
+
+    def process(self, pcm_data: bytes) -> Tuple[bytes, bool]:
+        """Return (pcm_out, gate_open). pcm_out is same length as pcm_data."""
+        if not pcm_data:
+            return pcm_data, False
+
+        rms = audioop.rms(pcm_data, 2)
+        num_samples = len(pcm_data) // 2
+
+        if rms >= self._ABS_SILENCE_FLOOR:
+            self._voiced_rms.append(rms)
+
+        # Until we have enough history, behave like a plain silence gate so
+        # we don't suppress the very first words of the call.
+        if len(self._voiced_rms) < self._MIN_HISTORY_FRAMES:
+            if rms >= self._ABS_SILENCE_FLOOR:
+                self._open_tail_remaining = self.open_tail_samples
+                self._frames_passed += 1
+                return pcm_data, True
+            self._frames_gated += 1
+            return b"\x00" * len(pcm_data), False
+
+        sorted_hist = sorted(self._voiced_rms)
+        p90 = sorted_hist[int(len(sorted_hist) * 0.9)]
+        threshold = max(self._ABS_SILENCE_FLOOR, int(p90 * self.gate_ratio))
+
+        if rms >= threshold:
+            self._open_tail_remaining = self.open_tail_samples
+            self._frames_passed += 1
+            self._maybe_log(threshold, p90)
+            return pcm_data, True
+
+        if self._open_tail_remaining > 0:
+            self._open_tail_remaining = max(
+                0, self._open_tail_remaining - num_samples
+            )
+            self._frames_passed += 1
+            return pcm_data, True
+
+        self._frames_gated += 1
+        self._maybe_log(threshold, p90)
+        return b"\x00" * len(pcm_data), False
+
+    def _maybe_log(self, threshold: int, p90: int) -> None:
+        total = self._frames_passed + self._frames_gated
+        if total - self._last_log_at_frames < 250:
+            return
+        self._last_log_at_frames = total
+        gated_pct = (self._frames_gated / total) * 100 if total else 0.0
+        print(
+            f"🎚️  [GATE] call={self.call_id} p90_rms={p90} threshold={threshold} "
+            f"passed={self._frames_passed} gated={self._frames_gated} "
+            f"({gated_pct:.0f}% gated)"
+        )
 
 
 def generate_silence_pcm(duration_ms: float, sample_rate: int = 8000) -> bytes:

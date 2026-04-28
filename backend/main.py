@@ -66,6 +66,7 @@ from backend.services.gemini_live import (
     GEMINI_VOICES,
 )
 from backend.utils.audio_utils import (
+    AdaptivePrimarySpeakerGate,
     convert_browser_to_gemini,
     convert_gemini_to_browser,
     reset_audio_states,
@@ -1061,6 +1062,7 @@ async def media_stream_browser(websocket: WebSocket):
     agent_pcm_buffer = io.BytesIO()
 
     speaker_verifier: SpeakerVerifier | None = None
+    primary_speaker_gate: AdaptivePrimarySpeakerGate | None = None
 
     function_call_completed_time = None
     FUNCTION_CALL_GRACE_PERIOD = 3.0
@@ -1105,6 +1107,9 @@ async def media_stream_browser(websocket: WebSocket):
         call_id = start_data["start"]["customParameters"].get("call_id")
         stream_sid = start_data["start"].get("streamSid", "browser-stream")
         speaker_verifier = SpeakerVerifier(call_id=call_id)
+        primary_speaker_gate = AdaptivePrimarySpeakerGate(
+            sample_rate=16000, call_id=call_id
+        )
         print(f"🔒 [SECURITY] SpeakerVerifier initialized for call {call_id}")
         meta = call_metadata.get(call_id, {})
         
@@ -1175,9 +1180,19 @@ async def media_stream_browser(websocket: WebSocket):
                             if token_tracker:
                                 token_tracker.add_input_audio(len(pcm_data))
 
+                            # Adaptive primary-speaker gate: zero out frames
+                            # that fall well below the rolling p90 of the
+                            # caller's voiced RMS. Sits in front of BOTH the
+                            # Gemini forward and the verifier so background
+                            # voices can't poison the enrollment voiceprint
+                            # (the first 3s of voiced audio).
+                            gated_pcm = pcm_data
+                            if primary_speaker_gate is not None:
+                                gated_pcm, _ = primary_speaker_gate.process(pcm_data)
+
                             # Passthrough to Gemini (16kHz -> 16kHz, no conversion needed)
                             # This eliminates resampling overhead for lower latency
-                            pcm_16khz = convert_browser_to_gemini(pcm_data, input_rate=16000)
+                            pcm_16khz = convert_browser_to_gemini(gated_pcm, input_rate=16000)
 
                             # Once the security handoff has fired, stop feeding
                             # mic audio to Gemini so it focuses on the
@@ -1190,7 +1205,7 @@ async def media_stream_browser(websocket: WebSocket):
                             # runs in the separate speaker_monitor task so it
                             # never blocks audio forwarding to Gemini.
                             try:
-                                speaker_verifier.add_audio(pcm_data)
+                                speaker_verifier.add_audio(gated_pcm)
                             except Exception as sv_err:
                                 print(f"❌ [SECURITY] add_audio error: {sv_err}")
                         
