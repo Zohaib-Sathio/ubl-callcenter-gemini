@@ -186,11 +186,15 @@ async def handle_call(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
             return
         pcm_8khz, down_state = audioop.ratecv(pcm_24khz, 2, 1, 24000, 8000, down_state)
         agent_pcm_8k_buffer.write(pcm_8khz)
+        # Pace at real-time: emit one 20 ms SLIN frame every 20 ms. Without this,
+        # bursts from Gemini overflow Asterisk's per-channel write queue and the
+        # caller hears clicks/garbled audio even though the bytes here are clean.
         for i in range(0, len(pcm_8khz), ASTERISK_FRAME_BYTES):
             chunk = pcm_8khz[i:i + ASTERISK_FRAME_BYTES]
             if not chunk:
                 continue
             writer.write(_frame(KIND_SLIN, chunk))
+            await asyncio.sleep(ASTERISK_FRAME_MS / 1000)
         try:
             await writer.drain()
         except ConnectionError:

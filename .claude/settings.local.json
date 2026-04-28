@@ -5,7 +5,18 @@
       "Bash(pip index:*)",
       "Bash(pip install:*)",
       "Bash(find . -name \"*.py\" -type f ! -path \"./.git/*\" -exec basename {} \\\\;)",
-      "Bash(bash -n \"/c/Users/zohai/Desktop/Bits Collision/ubl-callcenter-gemini/deploy/sip/firewalld/add-sip-rules.sh\")"
+      "Bash(bash -n \"/c/Users/zohai/Desktop/Bits Collision/ubl-callcenter-gemini/deploy/sip/firewalld/add-sip-rules.sh\")",
+      "Bash(FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch *)",
+      "Bash(git update-index *)",
+      "Bash(git rev-list *)",
+      "Bash(git cat-file *)",
+      "Bash(awk '$1==\"blob\" && $3 >= 50000000')",
+      "Bash(sort -k3 -n -r)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git stash *)",
+      "Bash(taskkill //F //IM python.exe)"
     ]
   }
 }
