@@ -20,7 +20,7 @@ load_dotenv(override=True)
 
 # Gemini Live API Configuration
 # Valid models for Live API: gemini-2.5-flash-native-audio-preview-12-2025
-GEMINI_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+GEMINI_MODEL = "gemini-2.5-flash-native-audio-preview-09-2025"
 GEMINI_SEND_SAMPLE_RATE = 16000  # Input audio sample rate
 GEMINI_RECEIVE_SAMPLE_RATE = 24000  # Output audio sample rate
 
