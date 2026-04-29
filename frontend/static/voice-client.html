@@ -783,6 +783,8 @@
           this.wasSpeaking = false;
           this.PREROLL_CHUNKS = Math.ceil(0.5 * sampleRate / 128);
           this.ringBuffer = [];
+          this.noiseFloor = 0.01;
+          this.loudStreak = 0;
         }
         process(inputs, outputs, parameters) {
           const input = inputs[0];
@@ -791,13 +793,20 @@
           let sum = 0;
           for (let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
           const rms = Math.sqrt(sum / ch.length);
-          const VOLUME_THRESHOLD = 0.08;
-          const HANGOVER_MS = 0.5;
-          if (rms > VOLUME_THRESHOLD) {
-            console.log("RMS:", rms);
+          const VOLUME_THRESHOLD = 0.15;
+          const MIN_SNR = 3.0;
+          const HANGOVER_S = 0.2;
+          const ONSET_FRAMES = 3;
+          if (rms < this.noiseFloor * 2) {
+            this.noiseFloor = 0.95 * this.noiseFloor + 0.05 * rms;
+          }
+          const isLoudEnough = rms > VOLUME_THRESHOLD && rms > this.noiseFloor * MIN_SNR;
+          if (isLoudEnough) this.loudStreak++; else this.loudStreak = 0;
+          const speechOnset = this.loudStreak >= ONSET_FRAMES;
+          if (speechOnset) {
             this.lastVoiceTime = currentTime;
           }
-          const isSpeaking = rms > VOLUME_THRESHOLD || (currentTime - this.lastVoiceTime) < HANGOVER_MS;
+          const isSpeaking = speechOnset || (currentTime - this.lastVoiceTime) < HANGOVER_S;
           if (isSpeaking && !this.wasSpeaking) {
             const preroll = this.ringBuffer;
             this.ringBuffer = [];
